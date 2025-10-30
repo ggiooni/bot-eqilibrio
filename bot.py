@@ -44,24 +44,40 @@ Eres el asistente de Eqilibrio.cl (Quiropraxia en Viña del Mar). Sé CONVERSACI
 **Horarios:** Mar/Jue 15-19h | Mié/Vie 10-18h | Sáb 10-13h
 **Ubicación:** Av. Reñaca Norte 25, Of. 1506, Viña del Mar
 
-**AGENDAMIENTO - FLUJO FLEXIBLE:**
+**AGENDAMIENTO - ANÁLISIS DEL CONTEXTO COMPLETO:**
 
-Si el usuario dice "en la tarde", "por la mañana", o un día sin hora específica:
-{"intent": "show_slots", "date": "YYYY-MM-DD"}
+ANALIZA TODO el historial de la conversación para extraer:
 
-Para agendar necesitas OBLIGATORIO:
-- Nombre completo (nombre y apellido)
-- Contacto: teléfono (mínimo 8 dígitos) O email
-- Fecha: YYYY-MM-DD
-- Hora: HH:MM exacta
+1. NOMBRE: Busca cualquier mención de nombre y apellido
+   - "Nicolas Josue" = nombre: Nicolas, apellido: Josue ✓
+   - "Soy Maria Gomez" = Maria Gomez ✓
+   - Si solo dice nombre, pide apellido específicamente
 
-Si tiene TODO completo y válido:
+2. CONTACTO: Busca números de teléfono (8+ dígitos) O emails
+   - "85649247" = teléfono válido ✓
+   - "+56912345678" = teléfono válido ✓
+   - "usuario@email.com" = email válido ✓
+
+3. FECHA: Extrae del contexto temporal
+   - "hoy" = usa fecha actual que te di
+   - "mañana" = fecha actual + 1 día
+   - "para el 15" = interpreta con mes/año actual
+
+4. HORA: Extrae cualquier mención de hora
+   - "a las 17" o "17 horas" = "17:00"
+   - "15:30" = "15:30"
+   - "tres de la tarde" = "15:00"
+
+IMPORTANTE: 
+- Revisa TODO el historial antes de pedir datos faltantes
+- Si el usuario ya dio un dato en mensajes anteriores, NO lo pidas de nuevo
+- Solo pide lo que REALMENTE falta
+
+Si tienes los 4 datos completos:
 {"intent": "schedule", "name": "Nombre Apellido", "contact": "teléfono_o_email", "date": "YYYY-MM-DD", "time": "HH:MM"}
 
 Si falta algo:
-{"intent": "schedule", "missing": ["los_que_faltan"]}
-
-Otras consultas: Responde en 2-3 líneas.
+{"intent": "schedule", "missing": ["específicamente_lo_que_falta"]}
 
 **SÉ FLEXIBLE:**
 - Acepta "Jose" pero pide apellido
@@ -94,7 +110,7 @@ MESSAGE_BUFFER = defaultdict(lambda: {
     'lock': threading.Lock(),
     'last_activity': time.time()
 })
-BUFFER_DELAY = 5  # 5 segundos para dar tiempo a escribir
+BUFFER_DELAY = 3  # 3 segundos para dar tiempo a escribir
 SESSION_CLEANUP_TIME = 600  # 10 minutos
 
 def cleanup_old_sessions():
@@ -163,7 +179,12 @@ def process_buffered_messages(phone_number):
         - "mañana" = {(today + datetime.timedelta(days=1)).strftime('%Y-%m-%d')}
         """
 
-        ai_prompt = f"{PROMPT_BASE}\n\n{current_date_info}\n\nHistorial:\n{full_context}"
+        ai_prompt = f"""{PROMPT_BASE}
+            {current_date_info}
+            **HISTORIAL COMPLETO DE LA CONVERSACIÓN:**
+            {full_context}
+            **INSTRUCCIÓN:** Analiza TODO el historial arriba antes de responder. Si el usuario ya proporcionó su nombre, teléfono, fecha u hora en mensajes anteriores, NO lo pidas de nuevo.
+            """
         ai_response = generate_ai_response(ai_prompt)
         
         # Procesa y envía respuesta
