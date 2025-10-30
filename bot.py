@@ -252,7 +252,7 @@ def whatsapp_webhook():
 def generate_ai_response(prompt):
     """Genera respuesta con Gemini"""
     try:
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
