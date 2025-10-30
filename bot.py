@@ -24,6 +24,7 @@ SCOPES = ['https://www.googleapis.com/auth/calendar']
 CALENDAR_ID = '059bad589de3d4b2457841451a3939ba605411559b7728fc617765e69947b3e5@group.calendar.google.com'  # Tu ID real
 TZ = pytz.timezone('America/Santiago')
 
+print("GOOGLE_SERVICE_ACCOUNT_JSON:", os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON'))  # Debug
 credentials_dict = json.loads(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON'))
 credentials = service_account.Credentials.from_service_account_info(credentials_dict, scopes=SCOPES)
 
