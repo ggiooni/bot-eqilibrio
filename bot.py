@@ -36,32 +36,30 @@ else:
     print("ERROR: GOOGLE_SERVICE_ACCOUNT_JSON no configurado")
     credentials = None
 
-# Prompt base
+# Prompt base - MÁS CORTO para evitar respuestas largas
 PROMPT_BASE = """
-Responde como asistente empático y holístico de Eqilibrio.cl (Centro de Quiropraxia, Neurología Funcional, Kinesiología y Medicina China en Viña del Mar). Sé cercano, motivador y usa un tono que transmita equilibrio mente-cuerpo.
+Eres el asistente de Eqilibrio.cl (Quiropraxia, Kinesiología, Medicina China en Viña del Mar). 
+Sé breve, cálido y profesional. MÁXIMO 3-4 líneas por respuesta.
 
 **Servicios y Precios:**
 - Primera consulta: $35.000
-- Sesiones normales: $40.000
-- Programa de 4 sesiones: $120.000
-- Método Equilibrio incluye: evaluación, diagnóstico y tratamiento quiropráctico + kinesiología + neurología funcional + acupuntura
-
-**Ubicación:** Avenida Reñaca Norte 25, Oficina 1506, Edificio Vista Montemar, Viña del Mar
+- Sesión normal: $40.000  
+- Pack 4 sesiones: $120.000
+- Método Equilibrio: Quiropraxia + kinesiología + acupuntura en una sesión
 
 **Horarios:**
-- Martes y Jueves: 15:00-19:00
-- Miércoles y Viernes: 10:00-18:00
-- Sábado: 10:00-13:00
-- Lunes y Domingo: CERRADO
+Mar/Jue: 15-19h | Mié/Vie: 10-18h | Sáb: 10-13h | Lun/Dom: CERRADO
 
-**AGENDAMIENTO:**
-Si la pregunta es sobre agendar, analiza si tiene: nombre, contacto (teléfono/email), fecha (YYYY-MM-DD), hora (HH:MM).
+**Ubicación:** Av. Reñaca Norte 25, Of. 1506, Viña del Mar
 
-- Si tiene TODO: {"intent": "schedule", "name": "nombre", "contact": "contacto", "date": "YYYY-MM-DD", "time": "HH:MM"}
-- Si falta algo: {"intent": "schedule", "missing": ["name", "contact", "date", "time"]}
-- Otras preguntas: responde normalmente con texto amigable
+**AGENDAMIENTO - IMPORTANTE:**
+Si quiere agendar, necesitas: nombre, contacto, fecha (YYYY-MM-DD), hora (HH:MM).
 
-Usa Markdown: *negrita* para destacar, listas para opciones.
+- Si tiene TODO, responde SOLO: {"intent": "schedule", "name": "X", "contact": "Y", "date": "Z", "time": "W"}
+- Si falta algo, responde SOLO: {"intent": "schedule", "missing": ["lo que falta"]}
+- Otras consultas: Responde en 2-3 líneas máximo, sin repetir info innecesaria.
+
+NUNCA repitas el JSON en texto. NUNCA des respuestas largas.
 """
 
 # Buffer de mensajes
@@ -71,7 +69,7 @@ MESSAGE_BUFFER = defaultdict(lambda: {
     'lock': threading.Lock(),
     'last_activity': time.time()
 })
-BUFFER_DELAY = 3
+BUFFER_DELAY = 4  # 4 segundos para agrupar
 SESSION_CLEANUP_TIME = 300
 
 def cleanup_old_sessions():
@@ -97,7 +95,7 @@ def process_buffered_messages(phone_number):
         session['timer'] = None
     
     try:
-        ai_prompt = f"{PROMPT_BASE}\n\nPregunta del usuario:\n{grouped_message}"
+        ai_prompt = f"{PROMPT_BASE}\n\nConsulta del usuario:\n{grouped_message}"
         ai_response = generate_ai_response(ai_prompt)
         
         # Procesa y envía respuesta
@@ -105,10 +103,10 @@ def process_buffered_messages(phone_number):
         send_whatsapp_message(phone_number, response_text)
         
     except Exception as e:
-        print(f"Error procesando mensajes: {str(e)}")
+        print(f"Error procesando: {str(e)}")
         send_whatsapp_message(
             phone_number,
-            "Disculpa, tuve un problema ¿Puedes repetir tu consulta?"
+            "Disculpa, hubo un error. ¿Puedes repetir tu consulta?"
         )
 
 def send_whatsapp_message(to_number, message):
@@ -122,12 +120,17 @@ def send_whatsapp_message(to_number, message):
         return
     
     try:
+        # Limita mensaje a 1500 caracteres (Twilio limit: 1600)
+        if len(message) > 1500:
+            message = message[:1497] + "..."
+        
         client = Client(account_sid, auth_token)
         client.messages.create(
             body=message,
             from_=from_whatsapp,
             to=to_number
         )
+        print(f"Mensaje enviado a {to_number}: {len(message)} chars")
     except Exception as e:
         print(f"Error enviando mensaje: {str(e)}")
 
@@ -144,29 +147,40 @@ def process_ai_response(ai_response):
             cleaned = cleaned[:-3]
         cleaned = cleaned.strip()
         
-        # Intenta parsear JSON
-        data = json.loads(cleaned)
+        # Busca JSON en la respuesta
+        if '{' in cleaned and '}' in cleaned:
+            start = cleaned.find('{')
+            end = cleaned.rfind('}') + 1
+            json_str = cleaned[start:end]
+            
+            try:
+                data = json.loads(json_str)
+                
+                if data.get('intent') == 'schedule':
+                    if 'missing' in data:
+                        missing_map = {
+                            'name': 'nombre',
+                            'contact': 'teléfono/email',
+                            'date': 'fecha (ej: 2025-11-15)',
+                            'time': 'hora (ej: 15:00)'
+                        }
+                        missing_texts = [missing_map.get(f, f) for f in data['missing']]
+                        return f"Para agendar necesito: {', '.join(missing_texts)} 📅"
+                    else:
+                        return handle_appointment_booking(data)
+            except json.JSONDecodeError:
+                pass
         
-        if data.get('intent') == 'schedule':
-            if 'missing' in data:
-                missing_map = {
-                    'name': 'tu nombre',
-                    'contact': 'tu teléfono o email',
-                    'date': 'la fecha (ej: 2025-11-15)',
-                    'time': 'la hora (ej: 15:00)'
-                }
-                missing_texts = [missing_map.get(f, f) for f in data['missing']]
-                return f"¡Genial! Para agendar necesito: *{', '.join(missing_texts)}* 😊"
-            else:
-                return handle_appointment_booking(data)
+        # Si no es JSON válido, retorna el texto limpio
+        # Elimina el JSON si apareció como texto
+        if '{"intent"' in cleaned:
+            cleaned = cleaned.split('{"intent"')[0].strip()
         
-        return ai_response
+        return cleaned if cleaned else "¿En qué puedo ayudarte?"
         
-    except json.JSONDecodeError:
-        return ai_response
     except Exception as e:
         print(f"Error procesando respuesta: {str(e)}")
-        return "Disculpa, hubo un error. ¿Puedes intentar de nuevo?"
+        return "¿En qué más puedo ayudarte?"
 
 def handle_appointment_booking(data):
     """Maneja agendamiento de cita"""
@@ -187,17 +201,17 @@ def handle_appointment_booking(data):
         
         # Verifica disponibilidad
         if check_freebusy(dt, end_dt):
-            return f"Lo siento, el {date_str} a las {time_str} ya está ocupado. ¿Otro horario? 📅"
+            return f"Esa hora está ocupada. ¿Prefieres otro horario? 📅"
         
         # Crea cita
         create_appointment(name, contact, dt)
-        return f"✅ ¡Cita agendada para *{name}* el {date_str} a las {time_str}!\n\nTe enviaremos confirmación. ¡Nos vemos pronto! 🌟"
+        return f"✅ Cita agendada para {name}\n📅 {date_str} a las {time_str}\n\n¡Te esperamos!"
         
     except ValueError:
-        return "❌ Formato de fecha/hora incorrecto. Usa YYYY-MM-DD y HH:MM"
+        return "Formato incorrecto. Usa YYYY-MM-DD para fecha y HH:MM para hora."
     except Exception as e:
         print(f"Error agendando: {str(e)}")
-        return "Hubo un problema al agendar. Intenta de nuevo o contacta al equipo."
+        return "Error al agendar. Intenta de nuevo o llámanos."
 
 def validate_business_hours(dt):
     """Valida horarios de negocio"""
@@ -205,18 +219,18 @@ def validate_business_hours(dt):
     hour = dt.hour
     
     if weekday == 0:
-        return "❌ Cerrado los lunes"
+        return "❌ Cerrados los lunes"
     elif weekday == 6:
-        return "❌ Cerrado los domingos"
+        return "❌ Cerrados los domingos"
     elif weekday in [1, 3]:  # Mar, Jue
         if not (15 <= hour < 19):
-            return "❌ Martes y jueves: 15:00-19:00"
+            return "Mar/Jue: 15:00-19:00"
     elif weekday in [2, 4]:  # Mie, Vie
         if not (10 <= hour < 18):
-            return "❌ Miércoles y viernes: 10:00-18:00"
+            return "Mié/Vie: 10:00-18:00"
     elif weekday == 5:  # Sab
         if not (10 <= hour < 13):
-            return "❌ Sábados: 10:00-13:00"
+            return "Sábados: 10:00-13:00"
     
     return None
 
@@ -257,7 +271,14 @@ def generate_ai_response(prompt):
         return response.text
     except Exception as e:
         print(f"Error Gemini: {str(e)}")
-        return "Disculpa, tuve un problema técnico. ¿Puedes repetir?"
+        # Fallback a modelo estable
+        try:
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e2:
+            print(f"Error Gemini fallback: {str(e2)}")
+            return "Disculpa, tengo problemas técnicos. ¿Puedes repetir?"
 
 def check_freebusy(start_dt, end_dt):
     """Verifica disponibilidad en calendario"""
@@ -275,7 +296,7 @@ def check_freebusy(start_dt, end_dt):
         busy = response['calendars'][CALENDAR_ID].get('busy', [])
         return len(busy) > 0
     except Exception as e:
-        print(f"Error verificando calendario: {str(e)}")
+        print(f"Error calendario: {str(e)}")
         return False
 
 def create_appointment(name, contact, dt):
@@ -308,7 +329,7 @@ def create_appointment(name, contact, dt):
         }
         
         service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-        print(f"Cita creada: {name} - {dt}")
+        print(f"✓ Cita creada: {name} - {dt}")
         
     except Exception as e:
         print(f"Error creando cita: {str(e)}")
