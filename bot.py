@@ -12,6 +12,7 @@ import json
 import time
 import threading
 from collections import defaultdict
+import re  # Added for email validation
 
 load_dotenv()
 
@@ -33,8 +34,7 @@ if credentials_json:
         credentials_dict, scopes=SCOPES
     )
 else:
-    print("ERROR: GOOGLE_SERVICE_ACCOUNT_JSON no configurado")
-    credentials = None
+    raise ValueError("ERROR: GOOGLE_SERVICE_ACCOUNT_JSON no configurado")  # Changed to raise error early
 
 # Prompt mejorado para mejor extracción
 PROMPT_BASE = """
@@ -68,6 +68,22 @@ Otras consultas: Responde en 2-3 líneas.
 - Acepta formatos de fecha variados (conviértelos a YYYY-MM-DD)
 - Si dicen "mañana tarde", usa show_slots para mostrar horarios
 - Valida que teléfono tenga al menos 8 dígitos o que sea un email válido
+
+**ESCALAMIENTO A HUMANO:**
+Si el usuario pregunta sobre:
+- Diagnósticos específicos o condiciones médicas complejas
+- Casos que requieren evaluación profesional
+- Dudas que no puedes responder con seguridad
+- Solicita hablar con el quiropráctico directamente
+
+Responde con: {"intent": "human_support", "reason": "breve razón"}
+
+Ejemplos de cuándo escalar:
+- "Tengo una hernia discal, ¿me pueden atender?"
+- "Estoy embarazada, ¿puedo recibir tratamiento?"
+- "Tuve una cirugía hace 1 mes"
+- "Tomo anticoagulantes"
+- Cualquier condición médica seria
 """
 
 # Buffer de mensajes con historial
@@ -91,6 +107,17 @@ def cleanup_old_sessions():
     for phone in to_delete:
         del MESSAGE_BUFFER[phone]
 
+def needs_human_intervention(message):
+    """Detecta si el mensaje requiere intervención humana"""
+    critical_keywords = [
+        'hernia', 'embarazada', 'embarazo', 'cirugía', 'operado', 'operada',
+        'anticoagulante', 'marcapasos', 'cáncer', 'tumor', 'fractura',
+        'infarto', 'derrame', 'diabetes severa', 'epilepsia'
+    ]
+    
+    message_lower = message.lower()
+    return any(keyword in message_lower for keyword in critical_keywords)
+
 def process_buffered_messages(phone_number):
     """Procesa mensajes agrupados con historial"""
     session = MESSAGE_BUFFER[phone_number]
@@ -111,9 +138,18 @@ def process_buffered_messages(phone_number):
         
         # Crea contexto completo
         full_context = '\n---\n'.join(session['history'])
-        
+                
         session['messages'] = []
         session['timer'] = None
+        # Detección automática de casos críticos
+        if needs_human_intervention(full_context):
+            support_phone = os.getenv('WHATSAPP_SUPPORT', '+56912345678')
+            support_name = os.getenv('SUPPORT_NAME', 'nuestro quiropráctico')
+            
+            response_text = f"Gracias por compartir. Por la naturaleza de tu consulta, es mejor que hables directamente con {support_name} para evaluarte bien:\n\n📱 {support_phone}\n\n¿O prefieres agendar una evaluación?"
+            
+            send_whatsapp_message(phone_number, response_text)
+            return  # No llama a Gemini, responde directo
     
     try:
         # Incluye TODO el historial en el prompt
@@ -132,11 +168,7 @@ def process_buffered_messages(phone_number):
         
         # Procesa y envía respuesta
         response_text = process_ai_response(ai_response)
-        
-        # Guarda respuesta en historial
-        with session['lock']:
-            session['history'].append(f"[Bot]: {response_text}")
-        
+                        
         send_whatsapp_message(phone_number, response_text)
         
     except Exception as e:
@@ -193,7 +225,22 @@ def process_ai_response(ai_response):
             try:
                 data = json.loads(json_str)
                 
-                if data.get('intent') == 'schedule':
+                if data.get('intent') == 'human_support':
+                    reason = data.get('reason', 'consulta específica')
+                    support_phone = os.getenv('WHATSAPP_SUPPORT', '+56912345678')
+                    support_name = os.getenv('SUPPORT_NAME', 'nuestro quiropráctico')
+                    
+                    return f"Entiendo que tienes una {reason}. Para darte la mejor orientación, te conectaré con {support_name}:\n\n📱 {support_phone}\n\n¿Prefieres hablar con él directamente? Déjame tu número."
+                
+                elif data.get('intent') == 'show_slots':
+                    date_str = data.get('date')
+                    slots = get_available_slots(date_str)
+                    if slots:
+                        return f"Horarios disponibles el {date_str}: {', '.join(slots)} 😊 ¿Cuál te acomoda?"
+                    else:
+                        return f"No hay horarios disponibles el {date_str}. ¿Otro día?"
+                
+                elif data.get('intent') == 'schedule':
                     if 'missing' in data:
                         missing_map = {
                             'name': 'nombre completo',
@@ -217,7 +264,7 @@ def process_ai_response(ai_response):
     except Exception as e:
         print(f"Error procesando: {str(e)}")
         return "¿Cómo puedo ayudarte?"
-    
+
 def get_available_slots(date_str):
     """Obtiene horarios disponibles para una fecha"""
     try:
@@ -263,7 +310,7 @@ def handle_appointment_booking(data):
         # Validar contacto (teléfono de 8+ dígitos O email)
         contact_clean = contact.replace('+', '').replace(' ', '').replace('-', '')
         is_phone = contact_clean.isdigit() and len(contact_clean) >= 8
-        is_email = '@' in contact and '.' in contact
+        is_email = re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', contact) is not None
         
         if not (is_phone or is_email):
             return "Necesito un teléfono válido (8+ dígitos) o un email 📱"
@@ -282,7 +329,10 @@ def handle_appointment_booking(data):
                 date_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
         
         # Parsea fecha y hora
-        dt = datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        try:
+            dt = datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            return "Error en fecha/hora. Usa: YYYY-MM-DD y HH:MM (ej: 2025-11-15 15:00)"
         dt = TZ.localize(dt)
         end_dt = dt + datetime.timedelta(hours=1)
         
@@ -302,9 +352,6 @@ def handle_appointment_booking(data):
         fecha_formato = dt.strftime("%d/%m/%Y")
         return f"✅ ¡Listo {name}!\n📅 {fecha_formato} a las {time_str}\n📍 Av. Reñaca Norte 25, Of. 1506\n\n¡Te esperamos!"
         
-    except ValueError as e:
-        print(f"Error formato: {str(e)}")
-        return "Error en fecha/hora. Usa: YYYY-MM-DD y HH:MM (ej: 2025-11-15 15:00)"
     except Exception as e:
         print(f"Error agendando: {str(e)}")
         return "Error al agendar. Llámanos: +56 9 XXXX XXXX"
@@ -374,25 +421,17 @@ def whatsapp_webhook():
 def generate_ai_response(prompt):
     """Genera respuesta con Gemini"""
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        model = genai.GenerativeModel('gemini-2.5-pro') 
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        print(f"Error Gemini 2.0: {str(e)}")
-        # Fallback
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception as e2:
-            print(f"Error Gemini 1.5: {str(e2)}")
-            return "Disculpa, problemas técnicos. Intenta de nuevo."
+        print(f"Error Gemini: {str(e)}")
+        return "Disculpa, problemas técnicos. Intenta de nuevo."
 
 def check_freebusy(start_dt, end_dt):
     """Verifica disponibilidad en calendario"""
     if not credentials:
-        print("⚠️  Sin credenciales Calendar")
-        return False
+        raise Exception("Credenciales no configuradas")
     
     try:
         service = build('calendar', 'v3', credentials=credentials)
