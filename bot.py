@@ -38,32 +38,36 @@ else:
 
 # Prompt mejorado para mejor extracción
 PROMPT_BASE = """
-Eres el asistente de Eqilibrio.cl (Quiropraxia en Viña del Mar). Sé BREVE (máximo 2-3 líneas).
+Eres el asistente de Eqilibrio.cl (Quiropraxia en Viña del Mar). Sé CONVERSACIONAL y cercano.
 
 **Servicios:** Primera consulta $35k | Sesión $40k | Pack 4 $120k
 **Horarios:** Mar/Jue 15-19h | Mié/Vie 10-18h | Sáb 10-13h
 **Ubicación:** Av. Reñaca Norte 25, Of. 1506, Viña del Mar
 
-**AGENDAMIENTO - MUY IMPORTANTE:**
-Analiza TODO el contexto de la conversación para extraer los datos.
+**AGENDAMIENTO - FLUJO FLEXIBLE:**
 
-Si el usuario quiere agendar, extrae de TODA la conversación:
-- Nombre: Busca cualquier nombre mencionado (ej: "Jose Miguel", "soy María")
-- Contacto: Teléfono (ej: 896171907, +56912345) o email
-- Fecha: Cualquier formato (30-10-2025, hoy, mañana) → Convierte a YYYY-MM-DD
-- Hora: Cualquier formato (18:30, 18.30, seis y media) → Convierte a HH:MM (24h)
+Si el usuario dice "en la tarde", "por la mañana", o un día sin hora específica:
+{"intent": "show_slots", "date": "YYYY-MM-DD"}
 
-IMPORTANTE HORAS:
-- "18:30", "18.30", "6:30 pm" → "18:30"
-- Si solo dice "6" o "18" → "18:00"
+Para agendar necesitas OBLIGATORIO:
+- Nombre completo (nombre y apellido)
+- Contacto: teléfono (mínimo 8 dígitos) O email
+- Fecha: YYYY-MM-DD
+- Hora: HH:MM exacta
 
-SOLO si tienes los 4 datos completos y válidos:
-{"intent": "schedule", "name": "nombre_completo", "contact": "teléfono_o_email", "date": "YYYY-MM-DD", "time": "HH:MM"}
+Si tiene TODO completo y válido:
+{"intent": "schedule", "name": "Nombre Apellido", "contact": "teléfono_o_email", "date": "YYYY-MM-DD", "time": "HH:MM"}
 
-Si falta ALGÚN dato o no está claro:
+Si falta algo:
 {"intent": "schedule", "missing": ["los_que_faltan"]}
 
-Otras preguntas: Responde brevemente sin mencionar JSON.
+Otras consultas: Responde en 2-3 líneas.
+
+**SÉ FLEXIBLE:**
+- Acepta "Jose" pero pide apellido
+- Acepta formatos de fecha variados (conviértelos a YYYY-MM-DD)
+- Si dicen "mañana tarde", usa show_slots para mostrar horarios
+- Valida que teléfono tenga al menos 8 dígitos o que sea un email válido
 """
 
 # Buffer de mensajes con historial
@@ -213,16 +217,69 @@ def process_ai_response(ai_response):
     except Exception as e:
         print(f"Error procesando: {str(e)}")
         return "¿Cómo puedo ayudarte?"
+    
+def get_available_slots(date_str):
+    """Obtiene horarios disponibles para una fecha"""
+    try:
+        dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        dt = TZ.localize(dt)
+        weekday = dt.weekday()
+        
+        # Define rangos según el día
+        if weekday == 0 or weekday == 6:  # Lun/Dom
+            return None  # Cerrado
+        elif weekday in [1, 3]:  # Mar/Jue
+            slots = [(15, 0), (16, 0), (17, 0), (18, 0)]
+        elif weekday in [2, 4]:  # Mié/Vie
+            slots = [(10, 0), (11, 0), (12, 0), (13, 0), (14, 0), (15, 0), (16, 0), (17, 0)]
+        elif weekday == 5:  # Sáb
+            slots = [(10, 0), (11, 0), (12, 0)]
+        
+        # Verifica disponibilidad de cada slot
+        available = []
+        for hour, minute in slots:
+            slot_dt = dt.replace(hour=hour, minute=minute)
+            end_dt = slot_dt + datetime.timedelta(hours=1)
+            
+            # Solo si es futuro y está libre
+            if slot_dt > datetime.datetime.now(TZ) and not check_freebusy(slot_dt, end_dt):
+                available.append(f"{hour:02d}:{minute:02d}")
+        
+        return available
+    except:
+        return None
 
 def handle_appointment_booking(data):
-    """Maneja agendamiento de cita"""
     try:
         name = data.get('name')
         contact = data.get('contact')
-        date_str = data.get('date')
+        date_str = data.get('date') 
         time_str = data.get('time')
         
+        # Validar nombre completo (al menos 2 palabras)
+        if len(name.split()) < 2:
+            return "Por favor, dame tu nombre y apellido completo 😊"
+        
+        # Validar contacto (teléfono de 8+ dígitos O email)
+        contact_clean = contact.replace('+', '').replace(' ', '').replace('-', '')
+        is_phone = contact_clean.isdigit() and len(contact_clean) >= 8
+        is_email = '@' in contact and '.' in contact
+        
+        if not (is_phone or is_email):
+            return "Necesito un teléfono válido (8+ dígitos) o un email 📱"
+        
         print(f"Intentando agendar: {name} | {contact} | {date_str} | {time_str}")
+        # Normaliza formato de hora
+        time_str = time_str.replace('.', ':').replace(' ', '')
+        if ':' not in time_str and len(time_str) <= 2:
+            time_str = f"{time_str}:00"  # "18" → "18:00"
+
+        # Normaliza formato de fecha  
+        date_str = date_str.replace('/', '-')
+        if date_str.count('-') == 2:
+            parts = date_str.split('-')
+            if len(parts[0]) == 2:  # DD-MM-YYYY
+                date_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
         
         # Parsea fecha y hora
         dt = datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
