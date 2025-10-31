@@ -135,25 +135,35 @@ def init_db():
 @contextmanager
 def get_db():
     """Context manager para conexión a BD"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Error en transacción BD: {e}")
-        raise
-    finally:
+    # Asegura que la BD existe
+    if not os.path.exists(DB_PATH):
+        logger.warning(f"BD no existe, creando en {DB_PATH}")
+        conn = sqlite3.connect(DB_PATH)
         conn.close()
+        init_db()
+    
+    conn = sqlite3.connect(DB_PATH)
 
 def save_message(phone, direction, content, intent=None):
     """Guarda mensaje en BD"""
-    with get_db() as conn:
-        conn.execute(
-            'INSERT INTO messages (phone_number, direction, content, intent) VALUES (?, ?, ?, ?)',
-            (phone, direction, content, intent)
-        )
+    try:
+        with get_db() as conn:
+            conn.execute(
+                'INSERT INTO messages (phone_number, direction, content, intent) VALUES (?, ?, ?, ?)',
+                (phone, direction, content, intent)
+            )
+    except Exception as e:
+        logger.error(f"Error guardando mensaje: {e}")
+        # Intenta reinicializar BD
+        try:
+            init_db()
+            with get_db() as conn:
+                conn.execute(
+                    'INSERT INTO messages (phone_number, direction, content, intent) VALUES (?, ?, ?, ?)',
+                    (phone, direction, content, intent)
+                )
+        except:
+            pass  # No rompe el flujo
 
 def get_conversation_history(phone, limit=10):
     """Obtiene historial de conversación desde BD"""
