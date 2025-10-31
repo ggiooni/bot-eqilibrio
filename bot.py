@@ -132,38 +132,7 @@ def init_db():
         ''')
     logger.info("Base de datos inicializada correctamente")
 
-@contextmanager
-def get_db():
-    """Context manager para conexión a BD"""
-    # Asegura que la BD existe
-    if not os.path.exists(DB_PATH):
-        logger.warning(f"BD no existe, creando en {DB_PATH}")
-        conn = sqlite3.connect(DB_PATH)
-        conn.close()
-        init_db()
-    
-    conn = sqlite3.connect(DB_PATH)
 
-def save_message(phone, direction, content, intent=None):
-    """Guarda mensaje en BD"""
-    try:
-        with get_db() as conn:
-            conn.execute(
-                'INSERT INTO messages (phone_number, direction, content, intent) VALUES (?, ?, ?, ?)',
-                (phone, direction, content, intent)
-            )
-    except Exception as e:
-        logger.error(f"Error guardando mensaje: {e}")
-        # Intenta reinicializar BD
-        try:
-            init_db()
-            with get_db() as conn:
-                conn.execute(
-                    'INSERT INTO messages (phone_number, direction, content, intent) VALUES (?, ?, ?, ?)',
-                    (phone, direction, content, intent)
-                )
-        except:
-            pass  # No rompe el flujo
 
 def get_conversation_history(phone, limit=10):
     """Obtiene historial de conversación desde BD"""
@@ -789,8 +758,15 @@ def stats():
 # ============================================
 # INICIALIZACIÓN
 # ============================================
-if __name__ == '__main__':
+try:
     init_db()
+    logger.info("✅ Base de datos inicializada correctamente")
+except Exception as e:
+    logger.error(f"❌ Error inicializando BD: {e}")
+    # No raise - permite que el bot arranque igual
+
+if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     logger.info(f"🚀 Equilibrio Bot iniciando en puerto {port}...")
+    logger.info(f"📁 Base de datos: {DB_PATH}")
     app.run(host='0.0.0.0', port=port, debug=False)
