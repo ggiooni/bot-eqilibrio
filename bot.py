@@ -131,8 +131,85 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_appointments_datetime ON appointments(date_time);
         ''')
     logger.info("Base de datos inicializada correctamente")
+    
+@contextmanager
+def get_db():
+    """Context manager para conexión a BD"""
+    # Asegura que la BD existe antes de conectar
+    if not os.path.exists(DB_PATH):
+        logger.warning(f"⚠️ BD no existe, creando nueva en {DB_PATH}")
+        temp_conn = sqlite3.connect(DB_PATH)
+        temp_conn.close()
+        # Crea las tablas
+        conn = sqlite3.connect(DB_PATH)
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS conversations (
+                phone_number TEXT PRIMARY KEY,
+                state TEXT DEFAULT 'ACTIVE',
+                context TEXT,
+                last_message_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone_number TEXT,
+                direction TEXT,
+                content TEXT,
+                intent TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (phone_number) REFERENCES conversations(phone_number)
+            );
+            
+            CREATE TABLE IF NOT EXISTS appointments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone_number TEXT,
+                name TEXT,
+                contact TEXT,
+                date_time TIMESTAMP,
+                status TEXT DEFAULT 'PENDING',
+                google_event_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (phone_number) REFERENCES conversations(phone_number)
+            );
+            
+            CREATE TABLE IF NOT EXISTS pending_confirmations (
+                phone_number TEXT PRIMARY KEY,
+                appointment_data TEXT,
+                expires_at TIMESTAMP,
+                FOREIGN KEY (phone_number) REFERENCES conversations(phone_number)
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone_number);
+            CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_appointments_datetime ON appointments(date_time);
+        ''')
+        conn.commit()
+        conn.close()
+        logger.info("BD creada automáticamente")
+    
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error en transacción BD: {e}")
+        raise
+    finally:
+        conn.close()
 
-
+def save_message(phone, direction, content, intent=None):
+    """Guarda mensaje en BD (resiliente)"""
+    try:
+        with get_db() as conn:
+            conn.execute(
+                'INSERT INTO messages (phone_number, direction, content, intent) VALUES (?, ?, ?, ?)',
+                (phone, direction, content, intent)
+            )
+    except Exception as e:
+        logger.error(f"Error guardando mensaje: {e}")
 
 def get_conversation_history(phone, limit=10):
     """Obtiene historial de conversación desde BD"""
