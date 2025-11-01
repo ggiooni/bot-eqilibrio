@@ -66,6 +66,11 @@ conversation_logger.addHandler(conv_handler)
 # CONFIGURACIÓN BASE
 # ============================================
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+# Twilio
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 CALENDAR_ID = os.getenv('CALENDAR_ID', '059bad589de3d4b2457841451a3939ba605411559b7728fc617765e69947b3e5@group.calendar.google.com')
@@ -299,6 +304,20 @@ def save_appointment(phone, name, contact, dt, google_event_id):
         ''', (phone, name, contact, dt, google_event_id))
     
     logger.info(f"Cita guardada: {name} - {dt}")
+
+def send_whatsapp_message(to_phone, message):
+    """Envía mensaje de WhatsApp vía Twilio"""
+    try:
+        msg = twilio_client.messages.create(
+            body=message,
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=to_phone
+        )
+        logger.info(f"✓ Mensaje enviado a {to_phone} (SID: {msg.sid})")
+        return msg.sid
+    except Exception as e:
+        logger.error(f"✗ Error enviando mensaje a {to_phone}: {e}")
+        return None
 
 # ============================================
 # BUFFER DE MENSAJES (mantiene lógica actual)
