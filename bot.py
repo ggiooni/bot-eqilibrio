@@ -12,7 +12,8 @@ import time
 import threading
 from collections import defaultdict
 import re
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import logging
 from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
@@ -66,6 +67,7 @@ conversation_logger.addHandler(conv_handler)
 # CONFIGURACIÓN BASE
 # ============================================
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+
 # Twilio
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
@@ -86,115 +88,20 @@ else:
     raise ValueError("ERROR: GOOGLE_SERVICE_ACCOUNT_JSON no configurado")
 
 # ============================================
-# GESTIÓN DE BASE DE DATOS (SQLite)
+# GESTIÓN DE BASE DE DATOS (PostgreSQL/Supabase)
 # ============================================
-DB_PATH = os.getenv('DB_PATH', 'equilibrio_bot.db')
+DATABASE_URL = os.getenv('DATABASE_URL')
+CLIENT_ID = os.getenv('CLIENT_ID')
 
-def init_db():
-    """Inicializa la base de datos con las tablas necesarias"""
-    with get_db() as conn:
-        conn.executescript('''
-            CREATE TABLE IF NOT EXISTS conversations (
-                phone_number TEXT PRIMARY KEY,
-                state TEXT DEFAULT 'ACTIVE',
-                context TEXT,
-                last_message_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone_number TEXT,
-                direction TEXT,
-                content TEXT,
-                intent TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (phone_number) REFERENCES conversations(phone_number)
-            );
-            
-            CREATE TABLE IF NOT EXISTS appointments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone_number TEXT,
-                name TEXT,
-                contact TEXT,
-                date_time TIMESTAMP,
-                status TEXT DEFAULT 'PENDING',
-                google_event_id TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (phone_number) REFERENCES conversations(phone_number)
-            );
-            
-            CREATE TABLE IF NOT EXISTS pending_confirmations (
-                phone_number TEXT PRIMARY KEY,
-                appointment_data TEXT,
-                expires_at TIMESTAMP,
-                FOREIGN KEY (phone_number) REFERENCES conversations(phone_number)
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone_number);
-            CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_appointments_datetime ON appointments(date_time);
-        ''')
-    logger.info("Base de datos inicializada correctamente")
-    
+if not DATABASE_URL:
+    raise ValueError("ERROR: DATABASE_URL no configurado")
+if not CLIENT_ID:
+    raise ValueError("ERROR: CLIENT_ID no configurado")
+
 @contextmanager
 def get_db():
-    """Context manager para conexión a BD"""
-    # Asegura que la BD existe antes de conectar
-    if not os.path.exists(DB_PATH):
-        logger.warning(f"⚠️ BD no existe, creando nueva en {DB_PATH}")
-        temp_conn = sqlite3.connect(DB_PATH)
-        temp_conn.close()
-        # Crea las tablas
-        conn = sqlite3.connect(DB_PATH)
-        conn.executescript('''
-            CREATE TABLE IF NOT EXISTS conversations (
-                phone_number TEXT PRIMARY KEY,
-                state TEXT DEFAULT 'ACTIVE',
-                context TEXT,
-                last_message_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone_number TEXT,
-                direction TEXT,
-                content TEXT,
-                intent TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (phone_number) REFERENCES conversations(phone_number)
-            );
-            
-            CREATE TABLE IF NOT EXISTS appointments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone_number TEXT,
-                name TEXT,
-                contact TEXT,
-                date_time TIMESTAMP,
-                status TEXT DEFAULT 'PENDING',
-                google_event_id TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (phone_number) REFERENCES conversations(phone_number)
-            );
-            
-            CREATE TABLE IF NOT EXISTS pending_confirmations (
-                phone_number TEXT PRIMARY KEY,
-                appointment_data TEXT,
-                expires_at TIMESTAMP,
-                FOREIGN KEY (phone_number) REFERENCES conversations(phone_number)
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone_number);
-            CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_appointments_datetime ON appointments(date_time);
-        ''')
-        conn.commit()
-        conn.close()
-        logger.info("BD creada automáticamente")
-    
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    """Context manager para conexión a Supabase (PostgreSQL)"""
+    conn = psycopg2.connect(DATABASE_URL)
     try:
         yield conn
         conn.commit()
@@ -206,26 +113,40 @@ def get_db():
         conn.close()
 
 def save_message(phone, direction, content, intent=None):
-    """Guarda mensaje en BD (resiliente)"""
+    """Guarda mensaje en BD con client_id"""
     try:
         with get_db() as conn:
-            conn.execute(
-                'INSERT INTO messages (phone_number, direction, content, intent) VALUES (?, ?, ?, ?)',
-                (phone, direction, content, intent)
-            )
+            cursor = conn.cursor()
+            # Primero obtiene o crea la conversación
+            cursor.execute('''
+                INSERT INTO conversations (client_id, phone_number, last_message_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (client_id, phone_number) 
+                DO UPDATE SET last_message_at = NOW()
+                RETURNING id
+            ''', (CLIENT_ID, phone))
+            
+            conversation_id = cursor.fetchone()[0]
+            
+            # Guarda el mensaje
+            cursor.execute('''
+                INSERT INTO messages (conversation_id, client_id, phone_number, direction, content, intent)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            ''', (conversation_id, CLIENT_ID, phone, direction, content, intent))
     except Exception as e:
         logger.error(f"Error guardando mensaje: {e}")
 
 def get_conversation_history(phone, limit=10):
     """Obtiene historial de conversación desde BD"""
     with get_db() as conn:
-        cursor = conn.execute('''
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('''
             SELECT content, direction, timestamp 
             FROM messages 
-            WHERE phone_number = ?
+            WHERE phone_number = %s AND client_id = %s
             ORDER BY timestamp DESC 
-            LIMIT ?
-        ''', (phone, limit))
+            LIMIT %s
+        ''', (phone, CLIENT_ID, limit))
         
         messages = cursor.fetchall()
         
@@ -240,21 +161,23 @@ def get_conversation_history(phone, limit=10):
 def update_conversation_state(phone, state, context=None):
     """Actualiza estado de conversación"""
     with get_db() as conn:
-        conn.execute('''
-            INSERT INTO conversations (phone_number, state, context, last_message_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(phone_number) DO UPDATE SET
-                state = excluded.state,
-                context = excluded.context,
-                last_message_at = CURRENT_TIMESTAMP
-        ''', (phone, state, json.dumps(context) if context else None))
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO conversations (client_id, phone_number, state, context, last_message_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            ON CONFLICT (client_id, phone_number) DO UPDATE SET
+                state = EXCLUDED.state,
+                context = EXCLUDED.context,
+                last_message_at = NOW()
+        ''', (CLIENT_ID, phone, state, json.dumps(context) if context else None))
 
 def get_conversation_context(phone):
     """Obtiene contexto de conversación"""
     with get_db() as conn:
-        cursor = conn.execute(
-            'SELECT context FROM conversations WHERE phone_number = ?',
-            (phone,)
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            'SELECT context FROM conversations WHERE phone_number = %s AND client_id = %s',
+            (phone, CLIENT_ID)
         )
         row = cursor.fetchone()
         if row and row['context']:
@@ -266,24 +189,26 @@ def save_pending_confirmation(phone, appointment_data):
     expires_at = datetime.datetime.now() + datetime.timedelta(minutes=10)
     
     with get_db() as conn:
-        conn.execute('''
-            INSERT INTO pending_confirmations (phone_number, appointment_data, expires_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(phone_number) DO UPDATE SET
-                appointment_data = excluded.appointment_data,
-                expires_at = excluded.expires_at
-        ''', (phone, json.dumps(appointment_data), expires_at))
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO pending_confirmations (client_id, phone_number, appointment_data, expires_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (client_id, phone_number) DO UPDATE SET
+                appointment_data = EXCLUDED.appointment_data,
+                expires_at = EXCLUDED.expires_at
+        ''', (CLIENT_ID, phone, json.dumps(appointment_data), expires_at))
     
     logger.info(f"Confirmación guardada para {phone}")
 
 def get_pending_confirmation(phone):
     """Obtiene cita pendiente de confirmación"""
     with get_db() as conn:
-        cursor = conn.execute('''
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('''
             SELECT appointment_data 
             FROM pending_confirmations 
-            WHERE phone_number = ? AND expires_at > CURRENT_TIMESTAMP
-        ''', (phone,))
+            WHERE phone_number = %s AND client_id = %s AND expires_at > NOW()
+        ''', (phone, CLIENT_ID))
         
         row = cursor.fetchone()
         if row:
@@ -293,15 +218,29 @@ def get_pending_confirmation(phone):
 def clear_pending_confirmation(phone):
     """Limpia confirmación pendiente"""
     with get_db() as conn:
-        conn.execute('DELETE FROM pending_confirmations WHERE phone_number = ?', (phone,))
+        cursor = conn.cursor()
+        cursor.execute(
+            'DELETE FROM pending_confirmations WHERE phone_number = %s AND client_id = %s',
+            (phone, CLIENT_ID)
+        )
 
 def save_appointment(phone, name, contact, dt, google_event_id):
     """Guarda cita confirmada en BD"""
     with get_db() as conn:
-        conn.execute('''
-            INSERT INTO appointments (phone_number, name, contact, date_time, status, google_event_id)
-            VALUES (?, ?, ?, ?, 'CONFIRMED', ?)
-        ''', (phone, name, contact, dt, google_event_id))
+        cursor = conn.cursor()
+        # Primero obtiene el conversation_id
+        cursor.execute('''
+            SELECT id FROM conversations 
+            WHERE phone_number = %s AND client_id = %s
+        ''', (phone, CLIENT_ID))
+        
+        row = cursor.fetchone()
+        conversation_id = row[0] if row else None
+        
+        cursor.execute('''
+            INSERT INTO appointments (client_id, conversation_id, phone_number, name, contact, date_time, status, google_event_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 'CONFIRMED', %s)
+        ''', (CLIENT_ID, conversation_id, phone, name, contact, dt, google_event_id))
     
     logger.info(f"Cita guardada: {name} - {dt}")
 
@@ -313,6 +252,10 @@ def send_whatsapp_message(to_phone, message):
             from_=TWILIO_WHATSAPP_NUMBER,
             to=to_phone
         )
+        
+        # Guarda mensaje saliente
+        save_message(to_phone, 'outgoing', message)
+        conversation_logger.info(f"{to_phone} | OUT: {message}")
         logger.info(f"✓ Mensaje enviado a {to_phone} (SID: {msg.sid})")
         return msg.sid
     except Exception as e:
@@ -502,35 +445,6 @@ def handle_confirmation_response(phone, message, pending_data):
     # No entendió
     else:
         return "¿Confirmas la cita? Respondé 'Sí' para confirmar o 'No' para cambiar."
-
-def send_whatsapp_message(to_number, message):
-    """Envía mensaje vía Twilio"""
-    account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-    auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-    from_whatsapp = os.getenv('TWILIO_WHATSAPP_NUMBER', 'whatsapp:+14155238886')
-    
-    if not account_sid or not auth_token:
-        logger.error("Credenciales Twilio no configuradas")
-        return
-    
-    try:
-        if len(message) > 1500:
-            message = message[:1497] + "..."
-        
-        client = Client(account_sid, auth_token)
-        client.messages.create(
-            body=message,
-            from_=from_whatsapp,
-            to=to_number
-        )
-        
-        # Guarda mensaje saliente
-        save_message(to_number, 'outgoing', message)
-        conversation_logger.info(f"{to_number} | OUT: {message}")
-        logger.info(f"✓ Mensaje enviado a {to_number} ({len(message)} chars)")
-        
-    except Exception as e:
-        logger.error(f"✗ Error enviando a {to_number}: {str(e)}")
 
 def process_ai_response(phone_number, ai_response):
     """Procesa respuesta: JSON o texto"""
@@ -829,7 +743,7 @@ def health_check():
         'status': 'ok',
         'service': 'equilibrio-bot',
         'timestamp': datetime.datetime.now(TZ).isoformat(),
-        'db_path': DB_PATH
+        'database': 'supabase'
     }, 200
 
 @app.route('/stats', methods=['GET'])
@@ -837,9 +751,16 @@ def stats():
     """Endpoint de estadísticas básicas"""
     try:
         with get_db() as conn:
-            total_conversations = conn.execute('SELECT COUNT(*) FROM conversations').fetchone()[0]
-            total_messages = conn.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
-            total_appointments = conn.execute('SELECT COUNT(*) FROM appointments').fetchone()[0]
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT COUNT(*) FROM conversations WHERE client_id = %s', (CLIENT_ID,))
+            total_conversations = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM messages WHERE client_id = %s', (CLIENT_ID,))
+            total_messages = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM appointments WHERE client_id = %s', (CLIENT_ID,))
+            total_appointments = cursor.fetchone()[0]
             
             return {
                 'total_conversations': total_conversations,
@@ -854,15 +775,9 @@ def stats():
 # ============================================
 # INICIALIZACIÓN
 # ============================================
-try:
-    init_db()
-    logger.info("✅ Base de datos inicializada correctamente")
-except Exception as e:
-    logger.error(f"❌ Error inicializando BD: {e}")
-    # No raise - permite que el bot arranque igual
-
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     logger.info(f"🚀 Equilibrio Bot iniciando en puerto {port}...")
-    logger.info(f"📁 Base de datos: {DB_PATH}")
+    logger.info(f"📊 Base de datos: Supabase (PostgreSQL)")
+    logger.info(f"🏢 Cliente: {CLIENT_ID}")
     app.run(host='0.0.0.0', port=port, debug=False)
