@@ -246,12 +246,58 @@ def save_appointment(phone, name, contact, appointment_time, event_id=None):
             INSERT INTO appointments (client_id, conversation_id, phone_number, patient_name, contact_info, appointment_time, google_event_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
         ''', (CLIENT_ID, conversation_id, phone, name, contact, appointment_time, event_id))
+
 def handle_appointment_booking(data):
     try:
-        # ... (código existente)
+        name = data.get('name')
+        contact = data.get('contact')
+        date_str = data.get('date')
+        time_str = data.get('time')
+        
+        if len(name.split()) < 2:
+            return "Por favor, dame tu nombre y apellido completo 😊"
+        
+        contact_clean = contact.replace('+', '').replace(' ', '').replace('-', '')
+        is_phone = contact_clean.isdigit() and len(contact_clean) >= 8
+        is_email = re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', contact) is not None
+        
+        if not (is_phone or is_email):
+            return "Necesito un teléfono válido (8+ dígitos) o un email 📱"
+        
+        logger.info(f"Agendando: {name} | {contact} | {date_str} | {time_str}")
+        
+        time_str = time_str.replace('.', ':').replace(' ', '')
+        if ':' not in time_str and len(time_str) <= 2:
+            time_str = f"{time_str}:00"
+
+        date_str = date_str.replace('/', '-')
+        if date_str.count('-') == 2:
+            parts = date_str.split('-')
+            if len(parts[0]) == 2:
+                date_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
+        
+        try:
+            dt = datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            return "Error en fecha/hora. Usa: YYYY-MM-DD y HH:MM"
+        
+        dt = TZ.localize(dt)
+        end_dt = dt + datetime.timedelta(hours=1)
+        
+        error = validate_business_hours(dt)
+        if error:
+            return error
+        
+        if check_freebusy(dt, end_dt):
+            return f"❌ {date_str} a las {time_str} ya está ocupado.\n¿Otro horario?"
+        
+        # Crea cita y guarda en BD
         event_id = create_appointment(name, contact, dt)
         save_appointment(data.get('phone', 'unknown'), name, contact, dt, event_id)
-        # ... (return éxito)
+        
+        fecha_formato = dt.strftime("%d/%m/%Y")
+        return f"✅ ¡Listo {name}!\n📅 {fecha_formato} a las {time_str}\n📍 Av. Reñaca Norte 25, Of. 1506\n\n¡Te esperamos!"
+    
     except psycopg2.errors.UndefinedColumn as e:
         logger.error(f"Error de esquema en BD: {e}")
         return "Error en la base de datos (posible mismatch de columnas). Contacta al admin o llama al +56 9 7533 2088."
@@ -259,7 +305,8 @@ def handle_appointment_booking(data):
         logger.error(f"Error BD al agendar: {e}", exc_info=True)
         return "Cita creada en calendario, pero problema en BD. Llama al +56 9 7533 2088 para confirmar."
     except Exception as e:
-        # Manejo existente
+        logger.error(f"Error agendando: {str(e)}", exc_info=True)
+        return "Error al agendar. Llámanos: +56 9 7533 2088"
 
 # ============================================
 # BUFFER DE MENSAJES (agrupamiento inteligente)
