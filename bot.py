@@ -212,7 +212,9 @@ def get_pending_confirmation(phone):
         
         row = cursor.fetchone()
         if row:
-            return json.loads(row['appointment_data'])
+            data = row['appointment_data']
+            # Si ya es dict, devolver directo; si es string, parsear
+            return data if isinstance(data, dict) else json.loads(data)
     return None
 
 def clear_pending_confirmation(phone):
