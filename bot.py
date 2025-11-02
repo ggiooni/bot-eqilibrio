@@ -230,10 +230,36 @@ def save_appointment(phone, name, contact, appointment_time, event_id=None):
     """Guarda cita en BD"""
     with get_db() as conn:
         cursor = conn.cursor()
+        
+        # Obtener conversation_id (para vincular profesionalmente)
         cursor.execute('''
-            INSERT INTO appointments (client_id, phone_number, patient_name, contact_info, appointment_time, google_event_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        ''', (CLIENT_ID, phone, name, contact, appointment_time, event_id))
+            SELECT id FROM conversations 
+            WHERE client_id = %s AND phone_number = %s
+        ''', (CLIENT_ID, phone))
+        row = cursor.fetchone()
+        conversation_id = row[0] if row else None  # NULL si no existe (permitido)
+        if not conversation_id:
+            logger.warning(f"No se encontró conversación para {phone}, usando conversation_id=NULL")
+        
+        # INSERT original (ya profesional) + conversation_id
+        cursor.execute('''
+            INSERT INTO appointments (client_id, conversation_id, phone_number, patient_name, contact_info, appointment_time, google_event_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ''', (CLIENT_ID, conversation_id, phone, name, contact, appointment_time, event_id))
+def handle_appointment_booking(data):
+    try:
+        # ... (código existente)
+        event_id = create_appointment(name, contact, dt)
+        save_appointment(data.get('phone', 'unknown'), name, contact, dt, event_id)
+        # ... (return éxito)
+    except psycopg2.errors.UndefinedColumn as e:
+        logger.error(f"Error de esquema en BD: {e}")
+        return "Error en la base de datos (posible mismatch de columnas). Contacta al admin o llama al +56 9 7533 2088."
+    except psycopg2.Error as e:
+        logger.error(f"Error BD al agendar: {e}", exc_info=True)
+        return "Cita creada en calendario, pero problema en BD. Llama al +56 9 7533 2088 para confirmar."
+    except Exception as e:
+        # Manejo existente
 
 # ============================================
 # BUFFER DE MENSAJES (agrupamiento inteligente)
