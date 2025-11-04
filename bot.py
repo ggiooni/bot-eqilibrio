@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 from google.generativeai.types import Tool, FunctionDeclaration
-from google.generativeai.types.tool import Schema, Type as S
+from google.generativeai.types import content_types as S
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import datetime
