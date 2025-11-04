@@ -3,7 +3,8 @@ from twilio.rest import Client
 import os
 from dotenv import load_dotenv
 import google.generativeai as genai
-from google.generativeai.types import Tool, FunctionDeclaration, Schema, S 
+from google.generativeai.types import Tool, FunctionDeclaration
+from google.generativeai.types.tool import Schema, Type as S
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import datetime
@@ -580,7 +581,7 @@ Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas 
         
         bot_response_part = response.candidates[0].content.parts[0]
 
-        
+        # Revisa si Gemini pidió llamar a una herramienta
         if hasattr(bot_response_part, 'function_call') and bot_response_part.function_call:
             function_call = bot_response_part.function_call
             function_name = function_call.name
