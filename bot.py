@@ -581,7 +581,7 @@ Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas 
 
         
         model = genai.GenerativeModel(
-            model_name='gemini-2.5-flash-exp',  # Gemini 2.5 Flash experimental
+            model_name='gemini-2.5-flash',  # Gemini 2.5 Flash experimental
             generation_config={
                 'temperature': 0.3,  
                 'top_p': 0.95,
@@ -955,7 +955,7 @@ def health_check():
     return {
         'status': 'ok',
         'service': 'equilibrio-bot',
-        'model': 'gemini-2.5-flash-exp',
+        'model': 'gemini-2.5-flash',
         'timestamp': datetime.datetime.now(TZ).isoformat(),
         'database': 'supabase'
     }, 200
@@ -980,7 +980,7 @@ def stats():
                 'total_conversations': total_conversations,
                 'total_messages': total_messages,
                 'total_appointments': total_appointments,
-                'model': 'gemini-2.5-flash-exp',
+                'model': 'gemini-2.5-flash',
                 'timestamp': datetime.datetime.now(TZ).isoformat()
             }, 200
     except Exception as e:
