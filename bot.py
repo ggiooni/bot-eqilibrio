@@ -400,6 +400,12 @@ def generate_response(user_message, from_phone):
         # Verificar disponibilidad de horarios para hoy/mañana
         available_today = get_available_slots(datetime.datetime.now(TZ))
         available_tomorrow = get_available_slots(datetime.datetime.now(TZ) + datetime.timedelta(days=1))
+
+        # Detectar rechazos o preferencias en mensaje
+        if re.search(r'\b(no|no quiero|diferentes|cada \d+ d[ií]as|semanal|mensual)\b', user_message.lower()):
+            context['state'] = 'asking_preferences'  # Marca estado para que prompt sepa
+            context['user_preferences'] = user_message  # Guarda lo que dijo
+            update_conversation_state(from_phone, 'asking_preferences', context)
         
         # PROMPT MEJORADO CON EJEMPLOS REALES (Cambio: Modificado para usar herramientas en lugar de JSON)
         system_prompt = f"""Eres el asistente virtual de EQUILIBRIO, centro quiropráctico especializado en el Método Equilibrio.
@@ -425,12 +431,17 @@ def generate_response(user_message, from_phone):
 Av. Reñaca Norte 25, Oficina 1506, Viña del Mar
 
 **TELÉFONO:**
-+56 9 7533 2088
++56 9 8791 8694
 
 **MÉTODO EQUILIBRIO:**
 El Método Equilibrio es una técnica quiropráctica que trabaja con la columna vertebral, sistema nervioso y postura para mejorar el bienestar general del paciente.
 
 🤖 CÓMO AGENDAR CITAS:
+- Para paquetes (ej. 4-8 sesiones), sugiere horarios distribuidos: semanales (ej. cada miércoles), cada X días, mensuales, etc. Evita mismo día a menos que sea pedido.
+- Ejemplo para 4 sesiones: "Te sugiero una cada semana: Mié 5/11 10:00, Mié 12/11 10:00, Mié 19/11 10:00, Mié 26/11 10:00."
+- Valida disponibilidad en rango (próximos días/semanas/meses) y ajusta si esta ocupado.
+- Si usuario menciona frecuencia (ej. cada 4 días, mensual), calcula fechas acordemente.
+- Manejo de rechazos: Si 'no' o duda, responde: "Entiendo, ¿qué días/horas te acomodan mejor? ¿Prefieres semanal, cada X días, o en un mes específico?" Luego, usa tool si confirma.
 
 PASO 1: Si el usuario quiere agendar, pregunta PRIMERO por nombre completo
 Ejemplo: "¿Cuál es tu nombre completo?" (espera respuesta)
@@ -468,17 +479,12 @@ En estos casos, responde:
 "Por tu condición, es importante que hables directamente con nuestro quiropráctico para evaluar tu caso. Te recomiendo llamar al +56 9 7533 2088 para coordinar una evaluación personalizada."
 
 📊 DISPONIBILIDAD ACTUAL:
-- Hoy: {', '.join(available_today) if available_today else 'Sin disponibilidad'}
-- Mañana: {', '.join(available_tomorrow) if available_tomorrow else 'Sin disponibilidad'}
+- Próximos 7 días: {json.dumps(get_available_slots_in_range(datetime.datetime.now(TZ), datetime.datetime.now(TZ) + datetime.timedelta(days=7)))}
+- Próximos 30 días: Resume disponibles (usa rangos para multi-sesiones, ej. 'Miércoles disponibles: 5/11, 12/11, 19/11, 26/11').
 
-📝 HISTORIAL DE CONVERSACIÓN:
-{history if history else "Primera interacción"}
-
-💾 CONTEXTO ACTUAL:
-{json.dumps(context, ensure_ascii=False) if context else "Sin contexto previo"}
-
-⏳ CONFIRMACIÓN PENDIENTE:
-{json.dumps(pending, ensure_ascii=False) if pending else "Ninguna"}
+📝 HISTORIAL: {history}
+💾 CONTEXTO: {json.dumps(context)}
+⏳ PENDIENTE: {json.dumps(pending)}
 
 🎨 TONO Y ESTILO:
 - Amigable y cercano, usando emojis moderadamente
@@ -594,7 +600,10 @@ Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas 
         response = model.generate_content(
             f"{system_prompt}\n\nMensaje del usuario:\n{user_message}"
         )
-        
+        # Manejo de errores en respuesta
+        if not response.candidates or not response.candidates[0].content.parts:
+            logger.error(f"Respuesta de Gemini vacía o inválida para mensaje: {user_message}")
+            return "Disculpa, algo salió mal al procesar tu solicitud. ¿Puedes repetir?"
         
         bot_response_part = response.candidates[0].content.parts[0]
 
@@ -765,6 +774,17 @@ def get_available_slots(date):
     except Exception as e:
         logger.error(f"Error obteniendo slots: {e}")
         return None
+    
+def get_available_slots_in_range(start_date, end_date):
+    """Obtiene slots disponibles en un rango de fechas"""
+    current = start_date
+    available = {}
+    while current <= end_date:
+        slots = get_available_slots(current)
+        if slots:
+            available[current.strftime('%Y-%m-%d')] = slots
+        current += datetime.timedelta(days=1)
+    return available
 
 def handle_appointment_booking(data):
     try:
