@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from google.generativeai.types import Tool, FunctionDeclaration
 from google.generativeai.types import content_types as S
+from google.generativeai.types import Schema
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import datetime
@@ -315,8 +316,7 @@ def process_buffered_messages(from_phone):
 book_single_appointment_tool = FunctionDeclaration(
     name="book_single_appointment",
     description="Agenda una (1) cita única para un paciente.",
-    # 'parameters' define los argumentos que la IA debe rellenar
-    parameters=Schema(
+    parameters=Schema(  # Ahora Schema está importado
         type=S.OBJECT,
         properties={
             "name": Schema(type=S.STRING, description="Nombre y apellido completo del paciente"),
@@ -324,15 +324,15 @@ book_single_appointment_tool = FunctionDeclaration(
             "date": Schema(type=S.STRING, description="Fecha de la cita en formato YYYY-MM-DD"),
             "time": Schema(type=S.STRING, description="Hora de la cita en formato HH:MM"),
         },
-        required=["name", "contact", "date", "time"] # Argumentos obligatorios
+        required=["name", "contact", "date", "time"]
     )
 )
 
-# Herramienta 2: Agendar MÚLTIPLES citas (¡Para tu nuevo caso de uso!)
+# Herramienta 2: Agendar MÚLTIPLES citas
 book_multiple_appointments_tool = FunctionDeclaration(
     name="book_multiple_appointments",
     description="Agenda un paquete o serie de múltiples citas (ej: 4 sesiones) para un mismo paciente.",
-    parameters=Schema(
+    parameters=Schema(  # Ahora Schema está importado
         type=S.OBJECT,
         properties={
             "name": Schema(type=S.STRING, description="Nombre y apellido completo del paciente"),
@@ -340,7 +340,6 @@ book_multiple_appointments_tool = FunctionDeclaration(
             "appointments": Schema(
                 type=S.ARRAY,
                 description="Una lista de las citas a agendar.",
-                # 'items' le dice que es una lista de objetos
                 items=Schema(
                     type=S.OBJECT,
                     properties={
