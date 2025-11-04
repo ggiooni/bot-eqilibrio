@@ -313,56 +313,75 @@ def process_buffered_messages(from_phone):
 # ============================================
 
 # Herramienta 1: Agendar UNA cita
-book_single_appointment_tool = FunctionDeclaration(
-    name="book_single_appointment",
-    description="Agenda una (1) cita única para un paciente.",
-    parameters=Schema(  # Ahora Schema está importado
-        type=S.OBJECT,
-        properties={
-            "name": Schema(type=S.STRING, description="Nombre y apellido completo del paciente"),
-            "contact": Schema(type=S.STRING, description="Teléfono (ej: 912345678) o email del paciente"),
-            "date": Schema(type=S.STRING, description="Fecha de la cita en formato YYYY-MM-DD"),
-            "time": Schema(type=S.STRING, description="Hora de la cita en formato HH:MM"),
+book_single_appointment_tool = {
+    "name": "book_single_appointment",
+    "description": "Agenda una (1) cita única para un paciente.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Nombre y apellido completo del paciente"
+            },
+            "contact": {
+                "type": "string",
+                "description": "Teléfono (ej: 912345678) o email del paciente"
+            },
+            "date": {
+                "type": "string",
+                "description": "Fecha de la cita en formato YYYY-MM-DD"
+            },
+            "time": {
+                "type": "string",
+                "description": "Hora de la cita en formato HH:MM"
+            },
         },
-        required=["name", "contact", "date", "time"]
-    )
-)
+        "required": ["name", "contact", "date", "time"]
+    }
+}
 
 # Herramienta 2: Agendar MÚLTIPLES citas
-book_multiple_appointments_tool = FunctionDeclaration(
-    name="book_multiple_appointments",
-    description="Agenda un paquete o serie de múltiples citas (ej: 4 sesiones) para un mismo paciente.",
-    parameters=Schema(  # Ahora Schema está importado
-        type=S.OBJECT,
-        properties={
-            "name": Schema(type=S.STRING, description="Nombre y apellido completo del paciente"),
-            "contact": Schema(type=S.STRING, description="Teléfono (ej: 912345678) o email del paciente"),
-            "appointments": Schema(
-                type=S.ARRAY,
-                description="Una lista de las citas a agendar.",
-                items=Schema(
-                    type=S.OBJECT,
-                    properties={
-                        "date": Schema(type=S.STRING, description="Fecha en YYYY-MM-DD"),
-                        "time": Schema(type=S.STRING, description="Hora en HH:MM"),
+book_multiple_appointments_tool = {
+    "name": "book_multiple_appointments",
+    "description": "Agenda un paquete o serie de múltiples citas (ej: 4 sesiones) para un mismo paciente.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Nombre y apellido completo del paciente"
+            },
+            "contact": {
+                "type": "string",
+                "description": "Teléfono (ej: 912345678) o email del paciente"
+            },
+            "appointments": {
+                "type": "array",
+                "description": "Una lista de las citas a agendar.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "date": {
+                            "type": "string",
+                            "description": "Fecha en YYYY-MM-DD"
+                        },
+                        "time": {
+                            "type": "string",
+                            "description": "Hora en HH:MM"
+                        },
                     },
-                    required=["date", "time"]
-                )
-            )
+                    "required": ["date", "time"]
+                }
+            }
         },
-        required=["name", "contact", "appointments"]
-    )
-)
+        "required": ["name", "contact", "appointments"]
+    }
+}
 
-# Finalmente, crea el set de herramientas que le pasarás al modelo
-# Envuelve tus FunctionDeclaration en un objeto Tool
+# Crea el set de herramientas
 appointment_tools = Tool(
-    function_declarations=[
-        book_single_appointment_tool,
-        book_multiple_appointments_tool
-    ]
+    function_declarations=[book_single_appointment_tool, book_multiple_appointments_tool]
 )
-
 # ============================================
 # MODELO GEMINI 2.5 CON PROMPT MEJORADO
 # ============================================
