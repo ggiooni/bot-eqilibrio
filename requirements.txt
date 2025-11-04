@@ -9,7 +9,7 @@ twilio==9.8.5
 # Google (Gemini + Calendar)
 google-generativeai         
 google-api-python-client==2.185.0 
-google-auth==2.42.0 [cite: 1]
+google-auth==2.42.0
 
 # Database
 psycopg2-binary==2.9.9 
