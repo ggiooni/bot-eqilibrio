@@ -3,6 +3,7 @@ from twilio.rest import Client
 import os
 from dotenv import load_dotenv
 import google.generativeai as genai
+from google.generativeai.types import Tool, FunctionDeclaration, Schema, S 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import datetime
@@ -17,6 +18,7 @@ from psycopg2.extras import RealDictCursor
 import logging
 from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
+from twilio.request_validator import RequestValidator
 
 load_dotenv()
 
@@ -71,6 +73,7 @@ genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 # Twilio
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+validator = RequestValidator(TWILIO_AUTH_TOKEN)
 TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
@@ -247,67 +250,6 @@ def save_appointment(phone, name, contact, appointment_time, event_id=None):
             VALUES (%s, %s, %s, %s, %s, %s, %s)
         ''', (CLIENT_ID, conversation_id, phone, name, contact, appointment_time, event_id))
 
-def handle_appointment_booking(data):
-    try:
-        name = data.get('name')
-        contact = data.get('contact')
-        date_str = data.get('date')
-        time_str = data.get('time')
-        
-        if len(name.split()) < 2:
-            return "Por favor, dame tu nombre y apellido completo 😊"
-        
-        contact_clean = contact.replace('+', '').replace(' ', '').replace('-', '')
-        is_phone = contact_clean.isdigit() and len(contact_clean) >= 8
-        is_email = re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', contact) is not None
-        
-        if not (is_phone or is_email):
-            return "Necesito un teléfono válido (8+ dígitos) o un email 📱"
-        
-        logger.info(f"Agendando: {name} | {contact} | {date_str} | {time_str}")
-        
-        time_str = time_str.replace('.', ':').replace(' ', '')
-        if ':' not in time_str and len(time_str) <= 2:
-            time_str = f"{time_str}:00"
-
-        date_str = date_str.replace('/', '-')
-        if date_str.count('-') == 2:
-            parts = date_str.split('-')
-            if len(parts[0]) == 2:
-                date_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
-        
-        try:
-            dt = datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-        except ValueError:
-            return "Error en fecha/hora. Usa: YYYY-MM-DD y HH:MM"
-        
-        dt = TZ.localize(dt)
-        end_dt = dt + datetime.timedelta(hours=1)
-        
-        error = validate_business_hours(dt)
-        if error:
-            return error
-        
-        if check_freebusy(dt, end_dt):
-            return f"❌ {date_str} a las {time_str} ya está ocupado.\n¿Otro horario?"
-        
-        # Crea cita y guarda en BD
-        event_id = create_appointment(name, contact, dt)
-        save_appointment(data.get('phone', 'unknown'), name, contact, dt, event_id)
-        
-        fecha_formato = dt.strftime("%d/%m/%Y")
-        return f"✅ ¡Listo {name}!\n📅 {fecha_formato} a las {time_str}\n📍 Av. Reñaca Norte 25, Of. 1506\n\n¡Te esperamos!"
-    
-    except psycopg2.errors.UndefinedColumn as e:
-        logger.error(f"Error de esquema en BD: {e}")
-        return "Error en la base de datos (posible mismatch de columnas). Contacta al admin o llama al +56 9 7533 2088."
-    except psycopg2.Error as e:
-        logger.error(f"Error BD al agendar: {e}", exc_info=True)
-        return "Cita creada en calendario, pero problema en BD. Llama al +56 9 7533 2088 para confirmar."
-    except Exception as e:
-        logger.error(f"Error agendando: {str(e)}", exc_info=True)
-        return "Error al agendar. Llámanos: +56 9 7533 2088"
-
 # ============================================
 # BUFFER DE MENSAJES (agrupamiento inteligente)
 # ============================================
@@ -365,6 +307,63 @@ def process_buffered_messages(from_phone):
     send_whatsapp_message(from_phone, response)
 
 # ============================================
+# --- DEFINICIÓN DE HERRAMIENTAS DE AGENDAMIENTO --- (Cambio: Nueva sección añadida)
+# ============================================
+
+# Herramienta 1: Agendar UNA cita
+book_single_appointment_tool = FunctionDeclaration(
+    name="book_single_appointment",
+    description="Agenda una (1) cita única para un paciente.",
+    # 'parameters' define los argumentos que la IA debe rellenar
+    parameters=Schema(
+        type=S.OBJECT,
+        properties={
+            "name": Schema(type=S.STRING, description="Nombre y apellido completo del paciente"),
+            "contact": Schema(type=S.STRING, description="Teléfono (ej: 912345678) o email del paciente"),
+            "date": Schema(type=S.STRING, description="Fecha de la cita en formato YYYY-MM-DD"),
+            "time": Schema(type=S.STRING, description="Hora de la cita en formato HH:MM"),
+        },
+        required=["name", "contact", "date", "time"] # Argumentos obligatorios
+    )
+)
+
+# Herramienta 2: Agendar MÚLTIPLES citas (¡Para tu nuevo caso de uso!)
+book_multiple_appointments_tool = FunctionDeclaration(
+    name="book_multiple_appointments",
+    description="Agenda un paquete o serie de múltiples citas (ej: 4 sesiones) para un mismo paciente.",
+    parameters=Schema(
+        type=S.OBJECT,
+        properties={
+            "name": Schema(type=S.STRING, description="Nombre y apellido completo del paciente"),
+            "contact": Schema(type=S.STRING, description="Teléfono (ej: 912345678) o email del paciente"),
+            "appointments": Schema(
+                type=S.ARRAY,
+                description="Una lista de las citas a agendar.",
+                # 'items' le dice que es una lista de objetos
+                items=Schema(
+                    type=S.OBJECT,
+                    properties={
+                        "date": Schema(type=S.STRING, description="Fecha en YYYY-MM-DD"),
+                        "time": Schema(type=S.STRING, description="Hora en HH:MM"),
+                    },
+                    required=["date", "time"]
+                )
+            )
+        },
+        required=["name", "contact", "appointments"]
+    )
+)
+
+# Finalmente, crea el set de herramientas que le pasarás al modelo
+# Envuelve tus FunctionDeclaration en un objeto Tool
+appointment_tools = Tool(
+    function_declarations=[
+        book_single_appointment_tool,
+        book_multiple_appointments_tool
+    ]
+)
+
+# ============================================
 # MODELO GEMINI 2.5 CON PROMPT MEJORADO
 # ============================================
 
@@ -384,7 +383,7 @@ def generate_response(user_message, from_phone):
         available_today = get_available_slots(datetime.datetime.now(TZ))
         available_tomorrow = get_available_slots(datetime.datetime.now(TZ) + datetime.timedelta(days=1))
         
-        # PROMPT MEJORADO CON EJEMPLOS REALES
+        # PROMPT MEJORADO CON EJEMPLOS REALES (Cambio: Modificado para usar herramientas en lugar de JSON)
         system_prompt = f"""Eres el asistente virtual de EQUILIBRIO, centro quiropráctico especializado en el Método Equilibrio.
 
 🎯 TU MISIÓN: 
@@ -477,16 +476,15 @@ En estos casos, responde:
 5. Valida que el nombre tenga nombre Y apellido (mínimo 2 palabras)
 6. Valida que el contacto sea teléfono (8+ dígitos) o email válido
 
-🔧 FORMATO DE RESPUESTA PARA AGENDAR:
-SOLO cuando el usuario confirme "sí" o equivalente después de ver el resumen, responde:
+🔧 CÓMO AGENDAR (USO DE HERRAMIENTAS):  
 
-{{
-  "action": "book_appointment",
-  "name": "Nombre Apellido",
-  "contact": "912345678",
-  "date": "2024-03-20",
-  "time": "16:00"
-}}
+PASO 1: Recopila nombre, contacto, fecha y hora.
+PASO 2: Muestra el resumen al usuario y pide confirmación explícita (Sí/No).
+PASO 3: SOLO SI EL USUARIO CONFIRMA ("Sí", "Confirmo", "Dale"), usarás una herramienta.
+
+-   **Para 1 cita:** Llama a la herramienta `book_single_appointment` con los datos.
+-   **Para varias citas (ej: "Quiero 4 sesiones"):** Debes primero encontrar 4 horarios disponibles (ej: "Miércoles 10:00, Jueves 11:00..."), mostrarlos al usuario, y si confirma, llamar a la herramienta `book_multiple_appointments` con la *lista* de citas.
+-   **NUNCA llames a la herramienta sin la confirmación explícita del usuario.** Si el usuario solo está preguntando, responde como texto.
 
 ❌ EJEMPLOS DE CONVERSACIONES FALLIDAS (EVITAR):
 
@@ -524,8 +522,7 @@ Bot: "📋 Resumen de tu cita:
 
 ¿Confirmas para agendar?"
 Usuario: "Sí"
-Bot: {{
-  "action": "book_appointment",
+Bot: {{"action": "book_appointment",  # Nota: Esto se cambia internamente por la herramienta
   "name": "María González",
   "contact": "912345678",
   "date": "2024-03-20",
@@ -545,8 +542,7 @@ Bot: "Perfecto Pedro!
 
 ¿Confirmas para agendar?"
 Usuario: "Dale"
-Bot: {{
-  "action": "book_appointment",
+Bot: {{"action": "book_appointment",  # Nota: Esto se cambia internamente por la herramienta
   "name": "Pedro Silva",
   "contact": "987654321",
   "date": "2024-03-20",
@@ -565,83 +561,142 @@ Bot: "La primera consulta cuesta $35.000 y las sesiones siguientes $40.000. ¿Qu
 
 Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas reglas."""
 
-        # Llamada a Gemini 2.5 Flash (nuevo modelo)
+        
         model = genai.GenerativeModel(
-            model_name='gemini-2.0-flash-exp',  # Gemini 2.5 Flash experimental
+            model_name='gemini-2.5-flash-exp',  # Gemini 2.5 Flash experimental
             generation_config={
-                'temperature': 0.3,  # Más determinista para mayor precisión
+                'temperature': 0.3,  
                 'top_p': 0.95,
                 'top_k': 40,
                 'max_output_tokens': 800,
-            }
+            },
+            tools=[appointment_tools]  
         )
         
         response = model.generate_content(
             f"{system_prompt}\n\nMensaje del usuario:\n{user_message}"
         )
         
-        bot_response = response.text.strip()
         
-        # Detectar si es comando de agendamiento
-        if '{"action": "book_appointment"' in bot_response or '"action":"book_appointment"' in bot_response:
-            try:
-                # Extraer JSON de la respuesta
-                json_match = re.search(r'\{[^}]+\}', bot_response, re.DOTALL)
-                if json_match:
-                    appointment_data = json.loads(json_match.group())
-                    
-                    if appointment_data.get('action') == 'book_appointment':
-                        # Procesar agendamiento
-                        appointment_data['phone'] = from_phone
-                        result = handle_appointment_booking(appointment_data)
-                        clear_pending_confirmation(from_phone)
-                        return result
-            except Exception as e:
-                logger.error(f"Error procesando JSON de agendamiento: {e}")
-                return "Hubo un error al procesar tu cita. ¿Puedes confirmar nuevamente?"
+        bot_response_part = response.candidates[0].content.parts[0]
+
         
-        # Detectar si es un resumen pre-confirmación
-        if '¿Confirmas para agendar?' in bot_response or '¿Confirmas?' in bot_response:
-            # Extraer datos del resumen para guardar en pending_confirmations
-            try:
-                # Buscar datos en el resumen
-                name_match = re.search(r'Nombre:\s*([^\n]+)', bot_response)
-                date_match = re.search(r'Fecha:\s*([^\n]+)', bot_response)
-                time_match = re.search(r'Hora:\s*(\d{1,2}:\d{2})', bot_response)
-                contact_match = re.search(r'(?:Teléfono|Email):\s*([^\n]+)', bot_response)
-                
-                if name_match and date_match and time_match and contact_match:
-                    # Parsear fecha
-                    date_text = date_match.group(1).strip()
-                    # Intentar extraer fecha en formato DD/MM/YYYY
-                    date_number_match = re.search(r'(\d{2})/(\d{2})/(\d{4})', date_text)
-                    if date_number_match:
-                        day, month, year = date_number_match.groups()
-                        date_formatted = f"{year}-{month}-{day}"
-                    else:
-                        # Usar fecha sugerida del contexto o mañana por defecto
-                        date_formatted = (datetime.datetime.now(TZ) + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-                    
-                    pending_data = {
-                        'name': name_match.group(1).strip(),
-                        'contact': contact_match.group(1).strip(),
-                        'date': date_formatted,
-                        'time': time_match.group(1).strip(),
-                        'phone': from_phone
+        if hasattr(bot_response_part, 'function_call') and bot_response_part.function_call:
+            function_call = bot_response_part.function_call
+            function_name = function_call.name
+            args = function_call.args
+            
+            logger.info(f"🤖 Gemini solicita llamar a la herramienta: {function_name}")
+            
+            # -----------------------------------------------
+            # CASO 1: AGENDAR CITA ÚNICA
+            # -----------------------------------------------
+            if function_name == "book_single_appointment":
+                try:
+                    # Los argumentos ya vienen como un dict, no más JSON.loads
+                    appointment_data = {
+                        'name': args.get('name'),
+                        'contact': args.get('contact'),
+                        'date': args.get('date'),
+                        'time': args.get('time'),
+                        'phone': from_phone # Añade el 'from_phone'
                     }
-                    save_pending_confirmation(from_phone, pending_data)
-                    logger.info(f"Confirmación pendiente guardada: {pending_data}")
-            except Exception as e:
-                logger.error(f"Error guardando confirmación pendiente: {e}")
-        
-        # Detectar confirmación del usuario
-        if pending and re.search(r'\b(s[ií]|confirmo|dale|ok|okay|correcto)\b', user_message.lower()):
-            # Usuario confirmó, procesar agendamiento
-            result = handle_appointment_booking(pending)
-            clear_pending_confirmation(from_phone)
-            return result
-        
-        return bot_response
+                    
+                    # Llama a tu función de agendamiento existente
+                    result = handle_appointment_booking(appointment_data)
+                    clear_pending_confirmation(from_phone)
+                    return result
+                
+                except Exception as e:
+                    logger.error(f"Error procesando 'book_single_appointment': {e}")
+                    return "Hubo un error al procesar tu cita. ¿Puedes confirmar nuevamente?"
+            
+            # -----------------------------------------------
+            # CASO 2: AGENDAR CITAS MÚLTIPLES (¡NUEVO!)
+            # -----------------------------------------------
+            elif function_name == "book_multiple_appointments":
+                try:
+                    name = args.get('name')
+                    contact = args.get('contact')
+                    appointments_list = args.get('appointments', [])
+                    
+                    if not appointments_list:
+                        return "Error: Se intentó agendar múltiples citas pero no se encontraron fechas/horas."
+                    
+                    results_messages = []
+                    
+                    # Itera sobre la lista de citas que dio Gemini
+                    for appt in appointments_list:
+                        appointment_data = {
+                            'name': name,
+                            'contact': contact,
+                            'date': appt.get('date'),
+                            'time': appt.get('time'),
+                            'phone': from_phone
+                        }
+                        # Llama a tu función de booking POR CADA CITA
+                        result = handle_appointment_booking(appointment_data)
+                        results_messages.append(result)
+                    
+                    clear_pending_confirmation(from_phone)
+                    # Devuelve un resumen de todas las citas agendadas
+                    return f"¡Agendamiento múltiple completado!\n\n" + "\n\n".join(results_messages)
+    
+                except Exception as e:
+                    logger.error(f"Error procesando 'book_multiple_appointments': {e}")
+                    return "Hubo un error al procesar tus citas. Por favor, inténtalo de nuevo."
+    
+            # Si es otra herramienta que no conocemos
+            else:
+                logger.warning(f"Herramienta desconocida: {function_name}")
+                return "Disculpa, tuve un problema interno (Herramienta desconocida)."
+    
+        # Si no hay 'function_call', es una respuesta de texto normal
+        else:
+            bot_response = bot_response_part.text.strip()
+            
+            # Aquí puedes mantener tu lógica de 'pending_confirmation'
+            if '¿Confirmas para agendar?' in bot_response or '¿Confirmas?' in bot_response:
+                # Extraer datos del resumen para guardar en pending_confirmations
+                try:
+                    # Buscar datos en el resumen
+                    name_match = re.search(r'Nombre:\s*([^\n]+)', bot_response)
+                    date_match = re.search(r'Fecha:\s*([^\n]+)', bot_response)
+                    time_match = re.search(r'Hora:\s*(\d{1,2}:\d{2})', bot_response)
+                    contact_match = re.search(r'(?:Teléfono|Email):\s*([^\n]+)', bot_response)
+                    
+                    if name_match and date_match and time_match and contact_match:
+                        # Parsear fecha
+                        date_text = date_match.group(1).strip()
+                        # Intentar extraer fecha en formato DD/MM/YYYY
+                        date_number_match = re.search(r'(\d{2})/(\d{2})/(\d{4})', date_text)
+                        if date_number_match:
+                            day, month, year = date_number_match.groups()
+                            date_formatted = f"{year}-{month}-{day}"
+                        else:
+                            # Usar fecha sugerida del contexto o mañana por defecto
+                            date_formatted = (datetime.datetime.now(TZ) + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+                        
+                        pending_data = {
+                            'name': name_match.group(1).strip(),
+                            'contact': contact_match.group(1).strip(),
+                            'date': date_formatted,
+                            'time': time_match.group(1).strip(),
+                            'phone': from_phone
+                        }
+                        save_pending_confirmation(from_phone, pending_data)
+                        logger.info(f"Confirmación pendiente guardada: {pending_data}")
+                except Exception as e:
+                    logger.error(f"Error guardando confirmación pendiente: {e}")
+            
+            # Detectar confirmación del usuario
+            if pending and re.search(r'\b(s[ií]|confirmo|dale|ok|okay|correcto)\b', user_message.lower()):
+                # Usuario confirmó, procesar agendamiento
+                result = handle_appointment_booking(pending)
+                clear_pending_confirmation(from_phone)
+                return result
+            
+            return bot_response
         
     except Exception as e:
         logger.error(f"Error en Gemini: {str(e)}", exc_info=True)
@@ -828,14 +883,33 @@ def create_appointment(name, contact, dt):
 # ============================================
 @app.route('/whatsapp', methods=['POST'])
 def whatsapp_webhook():
-    """Webhook de Twilio"""
+    """Webhook de Twilio CON VALIDACIÓN DE SEGURIDAD"""
+    # --- INICIO DE BLOQUE DE SEGURIDAD ---
+    # Obtén la URL completa, los datos del formulario y la firma de la cabecera
+    url = request.url
+    post_data = request.form.to_dict()
+    twilio_signature = request.headers.get('X-Twilio-Signature', '')
+
+    # Valida la petición
+    if not validator.validate(url, post_data, twilio_signature):
+        logger.warning(f"ALERTA DE SEGURIDAD: Petición no validada desde {request.remote_addr}")
+        return 'Webhook no autorizado', 403 # 403 Forbidden
+    # --- FIN DE BLOQUE DE SEGURIDAD ---
     incoming_msg = request.values.get('Body', '').strip()
     from_phone = request.values.get('From', '')
     
     if not incoming_msg or not from_phone:
         return '', 200
     
-    logger.info(f"→ Mensaje de {from_phone}: {incoming_msg}")
+    # --- INICIO DE LOG ANÓNIMO ---
+    try:
+        # Obtiene solo los últimos 4 dígitos para depuración
+        phone_ending = from_phone[-4:] 
+        logger.info(f"→ [Validado] Mensaje de (***{phone_ending}): [MENSAJE RECIBIDO]")
+    except Exception:
+        # Fallback por si 'from_phone' es inválido
+        logger.info(f"→ [Validado] Mensaje de (***ANONIMO): [MENSAJE RECIBIDO]")
+    # --- FIN DE LOG ANÓNIMO ---
     
     cleanup_old_sessions()
     
@@ -863,7 +937,7 @@ def health_check():
     return {
         'status': 'ok',
         'service': 'equilibrio-bot',
-        'model': 'gemini-2.0-flash-exp',
+        'model': 'gemini-2.5-flash-exp',
         'timestamp': datetime.datetime.now(TZ).isoformat(),
         'database': 'supabase'
     }, 200
@@ -888,7 +962,7 @@ def stats():
                 'total_conversations': total_conversations,
                 'total_messages': total_messages,
                 'total_appointments': total_appointments,
-                'model': 'gemini-2.0-flash-exp',
+                'model': 'gemini-2.5-flash-exp',
                 'timestamp': datetime.datetime.now(TZ).isoformat()
             }, 200
     except Exception as e:
@@ -901,7 +975,7 @@ def stats():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     logger.info(f"🚀 Equilibrio Bot v2.0 iniciando en puerto {port}...")
-    logger.info(f"🤖 Modelo: Gemini 2.0 Flash Experimental")
+    logger.info(f"🤖 Modelo: Gemini 2.5 Flash Experimental")
     logger.info(f"📊 Base de datos: Supabase (PostgreSQL)")
     logger.info(f"🏢 Cliente: {CLIENT_ID}")
     app.run(host='0.0.0.0', port=port, debug=False)
