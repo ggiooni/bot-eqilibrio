@@ -261,7 +261,7 @@ MESSAGE_BUFFER = defaultdict(lambda: {
     'last_activity': time.time()
 })
 
-BUFFER_DELAY = 5  # segundos de espera
+BUFFER_DELAY = 8  # segundos de espera
 
 def cleanup_old_sessions():
     """Limpia sesiones inactivas > 30 min"""
@@ -476,6 +476,12 @@ PASO 5: SOLO si confirma, responde con el JSON de agendamiento
   * Muestra resumen y pide confirmación antes de tool call.
 - Si el usuario ajusta una propuesta (e.g., "no, 2 por semana"), responde: "Entendido, ajustemos: ¿Qué días prefieres? Te sugiero [nuevas opciones calculadas]. ¿Confirmas?"
 
+Manejo de Ajustes y Solicitudes Específicas:
+- Si el usuario ajusta (e.g., "no, quiero martes 11 a las 12, miércoles 12 a las 11"), trata como nueva propuesta: Valida disponibilidades, muestra resumen con esas fechas/horas exactas disponibles, o sugiere alternativas cercanas.
+- Maneja ambigüedades: "12 am" = 00:00 (midnight), "12 pm" = 12:00 (noon). Si dice "12" sin am/pm, asume mediodía (12:00) para horarios diurnos.
+- Para multi-citas específicas: Usa book_multiple_appointments directamente si confirma, pero siempre muestra resumen unificado primero.
+- Si falla validación (e.g., hora no disponible), responde: "Esa hora no está disponible, ¿qué tal [alternativa]? ¿Confirmas?"
+
 ⚠️ CASOS MÉDICOS COMPLEJOS - DERIVAR AL QUIROPRÁCTICO:
 Si detectas alguna de estas condiciones, NO intentes agendar directamente:
 - Embarazo
@@ -614,16 +620,21 @@ Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas 
         # Manejo de errores en respuesta
         # En generate_response(), después de response = model.generate_content(...):
 
-        max_retries = 2
+        max_retries = 3
         for attempt in range(max_retries):
             if not response.candidates or not response.candidates[0].content.parts:
                 logger.error(f"Intento {attempt+1}: Respuesta inválida. Reintentando con prompt simplificado.")
-                simplified_prompt = f"{system_prompt}\n\nSimplifica: Ignora historial complejo. Responde solo a: {user_message}"
+                simplified_prompt = f"""
+                {system_prompt[:2000]}  # Trunca prompt original a essentials para evitar overload.
+                \n\nHistorial reciente: {history[-500:]}  # Últimos 500 chars de history.
+                \n\nSimplifica: Ignora detalles complejos. Responde naturalmente a: {user_message}.
+                Si es agendamiento con horarios específicos, propone y pide confirmación.
+                """
                 response = model.generate_content(simplified_prompt)
             else:
                 break  # Sal si es válida
         if not response.candidates or not response.candidates[0].content.parts:
-            return "Lo siento, estoy teniendo problemas para procesar eso. ¿Puedes describir tu solicitud de nuevo de forma simple?"
+            return "Disculpa, para tener claridad y no equivocarme. ¿Puedes decirme solo las fechas y horas que quieres?"
         
         bot_response_part = response.candidates[0].content.parts[0]
 
@@ -662,36 +673,42 @@ Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas 
             # CASO 2: AGENDAR CITAS MÚLTIPLES (¡NUEVO!)
             # -----------------------------------------------
             elif function_name == "book_multiple_appointments":
-                try:
-                    name = args.get('name')
-                    contact = args.get('contact')
-                    appointments_list = args.get('appointments', [])
+            try:
+                name = args.get('name')
+                contact = args.get('contact')
+                appointments_list = args.get('appointments', [])
+                
+                if not appointments_list:
+                    return "Error: No se encontraron fechas/horas para agendar."
+                
+                booked_dates = []  # Lista para recolectar fechas agendadas.
+                for appt in appointments_list:
+                    appointment_data = {
+                        'name': name,
+                        'contact': contact,
+                        'date': appt.get('date'),
+                        'time': appt.get('time'),
+                        'phone': from_phone
+                    }
+                    result = handle_appointment_booking(appointment_data)
+                    if "Error" in result or "❌" in result:  # Si falla una, aborta y retorna error.
+                        return result  # e.g., "Esa hora no está disponible."
                     
-                    if not appointments_list:
-                        return "Error: Se intentó agendar múltiples citas pero no se encontraron fechas/horas."
-                    
-                    results_messages = []
-                    
-                    # Itera sobre la lista de citas que dio Gemini
-                    for appt in appointments_list:
-                        appointment_data = {
-                            'name': name,
-                            'contact': contact,
-                            'date': appt.get('date'),
-                            'time': appt.get('time'),
-                            'phone': from_phone
-                        }
-                        # Llama a tu función de booking POR CADA CITA
-                        result = handle_appointment_booking(appointment_data)
-                        results_messages.append(result)
-                    
-                    clear_pending_confirmation(from_phone)
-                    # Devuelve un resumen de todas las citas agendadas
-                    return f"¡Agendamiento múltiple completado!\n\n" + "\n\n".join(results_messages)
-    
-                except Exception as e:
-                    logger.error(f"Error procesando 'book_multiple_appointments': {e}")
-                    return "Hubo un error al procesar tus citas. Por favor, inténtalo de nuevo."
+                    # Extrae fecha formateada de result (asumiendo result es como "✅ ¡Listo... 📅 05/11/2025 a las 16:00")
+                    date_match = re.search(r'📅 (\d{2}/\d{2}/\d{4}) a las (\d{2}:\d{2})', result)
+                    if date_match:
+                        booked_dates.append(f"• {date_match.group(1)} a las {date_match.group(2)}")
+                
+                clear_pending_confirmation(from_phone)
+                
+                # Construye respuesta unificada y natural.
+                summary = f"¡Perfecto {name.split()[0]}! Tus citas han sido agendadas exitosamente:\n\n" + "\n".join(booked_dates) + f"\n\n📍 Recuerda: Av. Reñaca Norte 25, Of. 1506, Viña del Mar.\n¡Nos vemos pronto! 😊 Si necesitas cambios, avísame."
+                
+                return summary
+
+            except Exception as e:
+                logger.error(f"Error en múltiples: {e}")
+                return "Hubo un problema al agendar. ¿Intentamos de nuevo?"
     
             # Si es otra herramienta que no conocemos
             else:
@@ -814,21 +831,41 @@ def handle_appointment_booking(data):
         time_str = data.get('time')
         
         if len(name.split()) < 2:
-            return "Por favor, dame tu nombre y apellido completo 😊"
+            return {'success': False, 'message': "Por favor, dame tu nombre y apellido completo 😊"}
         
         contact_clean = contact.replace('+', '').replace(' ', '').replace('-', '')
         is_phone = contact_clean.isdigit() and len(contact_clean) >= 8
         is_email = re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', contact) is not None
         
         if not (is_phone or is_email):
-            return "Necesito un teléfono válido (8+ dígitos) o un email 📱"
+            return {'success': False, 'message': "Necesito un teléfono válido (8+ dígitos) o un email 📱"}
         
         logger.info(f"Agendando: {name} | {contact} | {date_str} | {time_str}")
         
-        time_str = time_str.replace('.', ':').replace(' ', '')
+        # Improved time parsing with am/pm handling
+        time_str = time_str.lower().replace('.', ':').replace(' ', '')
+        is_pm = 'pm' in time_str
+        is_am = 'am' in time_str
+        time_str = time_str.replace('am', '').replace('pm', '')
+        
         if ':' not in time_str and len(time_str) <= 2:
             time_str = f"{time_str}:00"
-
+        
+        # Parse hour and minute
+        try:
+            hour, minute = map(int, time_str.split(':'))
+        except ValueError:
+            return {'success': False, 'message': "Error en hora. Usa HH:MM o con am/pm"}
+        
+        # Handle am/pm conversion to 24h
+        if is_am and hour == 12:
+            hour = 0
+        elif is_pm and hour != 12:
+            hour += 12
+        elif is_pm and hour == 12:
+            hour = 12  # 12 pm is 12:00
+        time_str = f"{hour:02d}:{minute:02d}"
+        
         date_str = date_str.replace('/', '-')
         if date_str.count('-') == 2:
             parts = date_str.split('-')
@@ -838,28 +875,37 @@ def handle_appointment_booking(data):
         try:
             dt = datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
         except ValueError:
-            return "Error en fecha/hora. Usa: YYYY-MM-DD y HH:MM"
+            return {'success': False, 'message': "Error en fecha/hora. Usa: YYYY-MM-DD y HH:MM"}
         
         dt = TZ.localize(dt)
         end_dt = dt + datetime.timedelta(hours=1)
         
         error = validate_business_hours(dt)
         if error:
-            return error
+            return {'success': False, 'message': error}
         
         if check_freebusy(dt, end_dt):
-            return f"❌ {date_str} a las {time_str} ya está ocupado.\n¿Otro horario?"
+            return {'success': False, 'message': f"❌ {date_str} a las {time_str} ya está ocupado.\n¿Otro horario?"}
         
         # Crea cita y guarda en BD
         event_id = create_appointment(name, contact, dt)
         save_appointment(data.get('phone', 'unknown'), name, contact, dt, event_id)
         
         fecha_formato = dt.strftime("%d/%m/%Y")
-        return f"✅ ¡Listo {name}!\n📅 {fecha_formato} a las {time_str}\n📍 Av. Reñaca Norte 25, Of. 1506\n\n¡Te esperamos!"
+        formatted_time = time_str
+        
+        success_message = f"✅ ¡Listo {name}!\n📅 {fecha_formato} a las {formatted_time}\n📍 Av. Reñaca Norte 25, Of. 1506\n\n¡Te esperamos!"
+        
+        return {
+            'success': True,
+            'message': success_message,
+            'formatted_date': fecha_formato,
+            'formatted_time': formatted_time
+        }
         
     except Exception as e:
         logger.error(f"Error agendando: {str(e)}", exc_info=True)
-        return "Error al agendar. Llámanos: +56 9 7533 2088"
+        return {'success': False, 'message': "Error al agendar. Llámanos: +56 9 7533 2088"}
 
 def validate_business_hours(dt):
     """Valida horarios de negocio"""
