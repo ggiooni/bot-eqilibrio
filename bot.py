@@ -465,6 +465,17 @@ Ejemplo:
 
 PASO 5: SOLO si confirma, responde con el JSON de agendamiento
 
+🤖 Manejo de Frecuencias y Paquetes:
+- Si el usuario pide X sesiones con restricciones (e.g., "2 por semana", "esta semana y próxima"), calcula fechas distribuidas lógicamente:
+  * Identifica la semana actual (desde hoy hasta domingo).
+  * Para "esta semana": Propón hasta 2 slots disponibles en días abiertos restantes.
+  * Para "próxima semana": Propón en la siguiente (lunes a domingo).
+  * Usa `book_multiple_appointments` solo si confirma; de lo contrario, responde con texto proponiendo opciones.
+- Ejemplo: Usuario dice "2 sesiones esta semana y 3 la próxima".
+  * Calcula: Esta semana (e.g., Mié 5/11 10:00, Vie 7/11 11:00); Próxima (e.g., Mar 11/11 15:00, Mié 12/11 10:00, Jue 13/11 16:00).
+  * Muestra resumen y pide confirmación antes de tool call.
+- Si el usuario ajusta una propuesta (e.g., "no, 2 por semana"), responde: "Entendido, ajustemos: ¿Qué días prefieres? Te sugiero [nuevas opciones calculadas]. ¿Confirmas?"
+
 ⚠️ CASOS MÉDICOS COMPLEJOS - DERIVAR AL QUIROPRÁCTICO:
 Si detectas alguna de estas condiciones, NO intentes agendar directamente:
 - Embarazo
@@ -589,10 +600,10 @@ Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas 
         model = genai.GenerativeModel(
             model_name='gemini-2.5-flash',  # Gemini 2.5 Flash experimental
             generation_config={
-                'temperature': 0.3,  
+                'temperature': 0.1,  
                 'top_p': 0.95,
                 'top_k': 40,
-                'max_output_tokens': 800,
+                'max_output_tokens': 1024,
             },
             tools=[appointment_tools]  
         )
@@ -601,9 +612,18 @@ Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas 
             f"{system_prompt}\n\nMensaje del usuario:\n{user_message}"
         )
         # Manejo de errores en respuesta
+        # En generate_response(), después de response = model.generate_content(...):
+
+        max_retries = 2
+        for attempt in range(max_retries):
+            if not response.candidates or not response.candidates[0].content.parts:
+                logger.error(f"Intento {attempt+1}: Respuesta inválida. Reintentando con prompt simplificado.")
+                simplified_prompt = f"{system_prompt}\n\nSimplifica: Ignora historial complejo. Responde solo a: {user_message}"
+                response = model.generate_content(simplified_prompt)
+            else:
+                break  # Sal si es válida
         if not response.candidates or not response.candidates[0].content.parts:
-            logger.error(f"Respuesta de Gemini vacía o inválida para mensaje: {user_message}")
-            return "Disculpa, algo salió mal al procesar tu solicitud. ¿Puedes repetir?"
+            return "Lo siento, estoy teniendo problemas para procesar eso. ¿Puedes describir tu solicitud de nuevo de forma simple?"
         
         bot_response_part = response.candidates[0].content.parts[0]
 
