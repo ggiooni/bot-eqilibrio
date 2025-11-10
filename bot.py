@@ -638,7 +638,7 @@ Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas 
         
         bot_response_part = response.candidates[0].content.parts[0]
 
-        # Revisa si Gemini pidió llamar a una herramienta
+                # Revisa si Gemini pidió llamar a una herramienta
         if hasattr(bot_response_part, 'function_call') and bot_response_part.function_call:
             function_call = bot_response_part.function_call
             function_name = function_call.name
@@ -673,43 +673,43 @@ Ahora, responde al mensaje del usuario de forma natural y siguiendo todas estas 
             # CASO 2: AGENDAR CITAS MÚLTIPLES (¡NUEVO!)
             # -----------------------------------------------
             elif function_name == "book_multiple_appointments":
-            try:
-                name = args.get('name')
-                contact = args.get('contact')
-                appointments_list = args.get('appointments', [])
-                
-                if not appointments_list:
-                    return "Error: No se encontraron fechas/horas para agendar."
-                
-                booked_dates = []  # Lista para recolectar fechas agendadas.
-                for appt in appointments_list:
-                    appointment_data = {
-                        'name': name,
-                        'contact': contact,
-                        'date': appt.get('date'),
-                        'time': appt.get('time'),
-                        'phone': from_phone
-                    }
-                    result = handle_appointment_booking(appointment_data)
-                    if "Error" in result or "❌" in result:  # Si falla una, aborta y retorna error.
-                        return result  # e.g., "Esa hora no está disponible."
+                try:
+                    name = args.get('name')
+                    contact = args.get('contact')
+                    appointments_list = args.get('appointments', [])
                     
-                    # Extrae fecha formateada de result (asumiendo result es como "✅ ¡Listo... 📅 05/11/2025 a las 16:00")
-                    date_match = re.search(r'📅 (\d{2}/\d{2}/\d{4}) a las (\d{2}:\d{2})', result)
-                    if date_match:
-                        booked_dates.append(f"• {date_match.group(1)} a las {date_match.group(2)}")
-                
-                clear_pending_confirmation(from_phone)
-                
-                # Construye respuesta unificada y natural.
-                summary = f"¡Perfecto {name.split()[0]}! Tus citas han sido agendadas exitosamente:\n\n" + "\n".join(booked_dates) + f"\n\n📍 Recuerda: Av. Reñaca Norte 25, Of. 1506, Viña del Mar.\n¡Nos vemos pronto! 😊 Si necesitas cambios, avísame."
-                
-                return summary
+                    if not appointments_list:
+                        return "Error: No se encontraron fechas/horas para agendar."
+                    
+                    booked_dates = []  # Lista para recolectar fechas agendadas.
+                    for appt in appointments_list:
+                        appointment_data = {
+                            'name': name,
+                            'contact': contact,
+                            'date': appt.get('date'),
+                            'time': appt.get('time'),
+                            'phone': from_phone
+                        }
+                        result = handle_appointment_booking(appointment_data)
+                        if "Error" in result or "❌" in result:  # Si falla una, aborta y retorna error.
+                            return result  # e.g., "Esa hora no está disponible."
+                        
+                        # Extrae fecha formateada de result (asumiendo result es como "✅ ¡Listo... 📅 05/11/2025 a las 16:00")
+                        date_match = re.search(r'📅 (\d{2}/\d{2}/\d{4}) a las (\d{2}:\d{2})', result)
+                        if date_match:
+                            booked_dates.append(f"• {date_match.group(1)} a las {date_match.group(2)}")
+                    
+                    clear_pending_confirmation(from_phone)
+                    
+                    # Construye respuesta unificada y natural.
+                    summary = f"¡Perfecto {name.split()[0]}! Tus citas han sido agendadas exitosamente:\n\n" + "\n".join(booked_dates) + f"\n\n📍 Recuerda: Av. Reñaca Norte 25, Of. 1506, Viña del Mar.\n¡Nos vemos pronto! 😊 Si necesitas cambios, avísame."
+                    
+                    return summary
 
-            except Exception as e:
-                logger.error(f"Error en múltiples: {e}")
-                return "Hubo un problema al agendar. ¿Intentamos de nuevo?"
-    
+                except Exception as e:
+                    logger.error(f"Error en múltiples: {e}")
+                    return "Hubo un problema al agendar. ¿Intentamos de nuevo?"
+        
             # Si es otra herramienta que no conocemos
             else:
                 logger.warning(f"Herramienta desconocida: {function_name}")
